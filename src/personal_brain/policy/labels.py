@@ -23,6 +23,7 @@ class LabelSummary:
     target: str
     target_id: str
     revisions_relabeled: int = 0
+    skipped_withdrawn: int = 0  # 因处于撤回状态而被跳过的版本数
     scope_labels: tuple[str, ...] = ()
     sensitivity_labels: tuple[str, ...] = ()
     classification_status: str = "human_reviewed"
@@ -40,18 +41,27 @@ def _close_and_relabel(
     classification_status: str,
     policy_version: str,
     now: str,
-) -> int:
+) -> tuple[int, int]:
+    """重标当前**可用**版本；撤回版本一律跳过（§14.1 标注不得隐式恢复可见性）。
+
+    返回 (重标数, 跳过的已撤回版本数)。
+    """
     if classification_status not in _VALID_CLASSIFICATION:
         raise ValueError(f"非法 classification_status: {classification_status}")
     count = 0
+    skipped_withdrawn = 0
     for rid in revision_ids:
         old_rows = conn.execute(
             """
-            SELECT state_id, classification_status FROM revision_policy_state
+            SELECT state_id, availability FROM revision_policy_state
             WHERE revision_id = ? AND valid_to IS NULL
             """,
             (rid,),
         ).fetchall()
+        if not old_rows or any(o["availability"] != "available" for o in old_rows):
+            # 无当前状态行或处于 withdrawn：跳过，不写 available 行（缺陷 A 修复）
+            skipped_withdrawn += 1
+            continue
         for old in old_rows:
             # 继承未显式给出的标签？不：显式标注是权威覆盖（本地人工输入）
             conn.execute(
@@ -80,7 +90,7 @@ def _close_and_relabel(
                     (state_id, label),
                 )
             count += 1
-    return count
+    return count, skipped_withdrawn
 
 
 def label_source(
@@ -93,16 +103,24 @@ def label_source(
     policy_version: str = "v0-local",
     now: str | None = None,
 ) -> LabelSummary:
-    """把来源下全部事件的**可用**内容版本归入给定标签（单事务）。"""
+    """把来源下全部事件的**当前可用**内容版本归入给定标签（单事务）。
+
+    撤回状态下的来源不接受标注（§14.1：撤回不可被标注操作隐式解除）；
+    来源内个别被撤回的版本（事件级撤回所致）跳过并在结果中报告。
+    """
     now = now or utc_now_iso()
     conn.execute("BEGIN IMMEDIATE")
     try:
         src = conn.execute(
-            "SELECT source_id, account_namespace FROM sources WHERE source_id = ?",
+            "SELECT source_id, account_namespace, status FROM sources WHERE source_id = ?",
             (source_id,),
         ).fetchone()
         if src is None:
             raise ValueError(f"来源不存在: {source_id}")
+        if src["status"] == "withdrawn":
+            raise ValueError(
+                f"来源 {source_id} 处于撤回状态，不接受标注（§14.1）"
+            )
         revision_ids = [
             r["revision_id"]
             for r in conn.execute(
@@ -114,7 +132,7 @@ def label_source(
                 (source_id,),
             )
         ]
-        count = _close_and_relabel(
+        count, skipped = _close_and_relabel(
             conn,
             revision_ids=revision_ids,
             scope_labels=scope_labels,
@@ -131,6 +149,7 @@ def label_source(
         target="source",
         target_id=source_id,
         revisions_relabeled=count,
+        skipped_withdrawn=skipped,
         scope_labels=scope_labels,
         sensitivity_labels=sensitivity_labels,
         classification_status=classification_status,
@@ -153,7 +172,11 @@ def label_event(
     policy_version: str = "v0-local",
     now: str | None = None,
 ) -> LabelSummary:
-    """把单事件全部可用内容版本归入给定标签（单事务）。"""
+    """把单事件全部**当前可用**内容版本归入给定标签（单事务）。
+
+    事件处于撤回状态（无任何可用版本）时拒绝标注；部分版本被撤回时
+    跳过并在结果中报告（§14.1）。
+    """
     now = now or utc_now_iso()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -162,6 +185,22 @@ def label_event(
         ).fetchone()
         if ev is None:
             raise ValueError(f"事件不存在: {event_id}")
+        has_available = conn.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM event_revisions r
+                JOIN revision_policy_state ps
+                  ON ps.revision_id = r.revision_id
+                 AND ps.valid_to IS NULL AND ps.availability = 'available'
+                WHERE r.event_id = ?
+            )
+            """,
+            (event_id,),
+        ).fetchone()[0]
+        if not has_available:
+            raise ValueError(
+                f"事件 {event_id} 处于撤回状态，不接受标注（§14.1）"
+            )
         revision_ids = [
             r["revision_id"]
             for r in conn.execute(
@@ -169,7 +208,7 @@ def label_event(
                 (event_id,),
             )
         ]
-        count = _close_and_relabel(
+        count, skipped = _close_and_relabel(
             conn,
             revision_ids=revision_ids,
             scope_labels=scope_labels,
@@ -186,6 +225,7 @@ def label_event(
         target="event",
         target_id=event_id,
         revisions_relabeled=count,
+        skipped_withdrawn=skipped,
         scope_labels=scope_labels,
         sensitivity_labels=sensitivity_labels,
         classification_status=classification_status,

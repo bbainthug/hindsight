@@ -32,8 +32,9 @@
 | 21 | 撤回实现为版本化 policy_state 变更（available→withdrawn）+ `sources.status='withdrawn'`；检索/最近列表在 SQL 层强制 `availability='available'` 过滤；FTS 行保留但永不作为权威；purge/archive 不实现 | §14.1 撤回=从可服务数据移除但保留证据链；存储层天然满足 §14.3「恢复时先应用撤回登记」——撤回登记就在库内，恢复出的备份同样排除 | — |
 | 22 | 备份 = SQLite 在线 backup API 一致性快照（正确处理 WAL，§3.1 禁止运行时裸拷主文件）+ Raw 归档目录副本 + manifest（sha256/计数）；`restore-check` 只做校验（integrity/外键/迁移版本/计数/manifest 摘要），不做恢复向导 | §14.3 范围内最小可验证实现；完整恢复流程属后续阶段 | — |
 | 23 | CLI `show-event` 对已撤回事件**仍可显式查看**并标注 `availability: withdrawn`；检索/最近列表一律过滤。本地 CLI 定位为受信本地边界（§7.4 local_review 性质），MCP 端策略执行属 Phase B | §14.1"普通查询不可返回"中的"普通查询"=检索/列表/最近；按 ID 显式查看是人工核查通道，隐藏标记反而违背可追溯性 | Phase B 引入访问档案后收紧 |
-| 24 | CLI 标签命令显式覆盖标签（不做继承合并），scope 标签输出强制附混合话题警示（§16）；`label-source` 覆盖来源下全部事件全部可用版本，`label-event` 提供混合话题的细粒度出口 | §7.2 显式人工标注优先；§16 要求警示 | — |
+| 24 | CLI 标签命令显式覆盖标签（不做继承合并），scope 标签输出强制附混合话题警示（§16）；`label-source` 覆盖来源下全部事件全部**当前可用**版本，`label-event` 提供混合话题的细粒度出口；撤回状态下的来源/事件**拒绝标注**，来源内个别撤回版本跳过并报告 `skipped_withdrawn` | §7.2 显式人工标注优先；§16 要求警示；§14.1 撤回不可被标注操作隐式解除（验收缺陷 A） | — |
 | 25 | mypy 已配置并全绿（§3.1「类型检查」落地），严格度 pragmatic（check_untyped_defs, no_implicit_optional） | 消除"类型检查器未配置"已知限制 | — |
+| 26 | **撤回状态延续**：新内容版本入库时，policy_state 初始 availability 继承事件/来源的 withdrawn 状态（`_event_or_source_withdrawn`）；检索基线 SQL 另加 `sources.status != 'withdrawn'` 防御层 | §14.2.3「显式忘记此内容应覆盖重复来源，不能靠另一份导出保活」（验收缺陷 B）；新版本照常入库保留证据链，但不可检索；防御层堵住 policy 行状态漂移时的旁路 | 恢复可见性须显式流程（本批不提供），继承规则集中一处可改 |
 
 ## 已知限制（本切片内不做、不假装已做）
 
@@ -56,6 +57,12 @@
 - **缺陷 1（已修复）**：亚秒时间戳版本排序反超——`_format` 改固定微秒等宽格式（决策 13），Python/SQL 两侧排序键同构；新增亚秒乱序、等毫秒冲突回归测试。
 - **缺陷 2（已修复）**：目录符号链接逃逸被字符串前缀匹配放行——改 `Path.is_relative_to` 真包含判断；新增同前缀兄弟目录逃逸回归测试与根内链接放行正例。
 - 同批收编非阻塞建议：决策 14（未知时间对称化）、15（悬空父链）、16（source_assets manifest）、unsupported 口径统一（含 UNSUPPORTED_NODE/CONVERSATION）。
+
+## 批次 2 验收修复记录（2026-09-09 验收报告：撤回生命周期缺陷 A/B）
+
+- **缺陷 A（已修复）**：标注操作复活已撤回内容——`_close_and_relabel` 改为仅重标当前 `availability='available'` 的状态行；撤回状态的来源/事件整体**拒绝标注**（ValueError）；来源内个别撤回版本跳过并以 `LabelSummary.skipped_withdrawn` 报告。回归：撤回后标注不复活、事件级撤回的版本不被来源级标注复活、全撤回事件标注被拒。
+- **缺陷 B（已修复）**：撤回可被后续导入绕过——`_insert_revision` 初始化 policy_state 时经 `_event_or_source_withdrawn` 继承事件/来源的 withdrawn 状态（§14.2.3）；新版本照常入库（证据链保留、current 可指向它）但不可检索。检索基线 SQL 加 `sources.status != 'withdrawn'` 防御层（状态漂移兜底）。回归：撤回来源/事件后导入同事件身份的编辑导出，新版本入库且 availability=withdrawn、检索 0 命中、current 指向新版本仍排除；手工改 policy 行回 available 仍被 sources.status 过滤。
+- 同批收编非阻塞建议：`undated_excluded` 口径已在结果说明标注；`recent_events` 翻页、SQL 侧预过滤留待 MCP/Phase C。
 
 ## 批次 2 交付记录（检索基线 + 时间/路径过滤 + 标签 + 撤回 + 备份 + CLI）
 

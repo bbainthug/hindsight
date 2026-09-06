@@ -631,9 +631,50 @@ def _insert_revision(
         """
         INSERT INTO revision_policy_state (
             revision_id, policy_version, availability, classification_status, valid_from
-        ) VALUES (?, ?, 'available', 'unclassified', ?)
+        ) VALUES (?, ?, ?, 'unclassified', ?)
         """,
-        (revision_id, POLICY_VERSION_INITIAL, recorded_at),
+        (
+            revision_id,
+            POLICY_VERSION_INITIAL,
+            (
+                "withdrawn"
+                if _event_or_source_withdrawn(conn, event_id=event_id)
+                else "available"
+            ),
+            recorded_at,
+        ),
     )
     # 派生 FTS 索引与内容同事务写入（§5.2 可见性边界）
     index_revision(conn, revision_id, node.raw_text)
+
+
+def _event_or_source_withdrawn(conn: sqlite3.Connection, *, event_id: str) -> bool:
+    """事件或其来源当前是否处于撤回状态（§14.2.3 撤回延续）。
+
+    新内容版本的 policy_state 必须继承撤回状态：显式"忘记此内容"
+    覆盖重复来源，不能靠另一份导出保活（验收缺陷 B）。
+    """
+    row = conn.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM sources s
+            JOIN events e ON e.source_id = s.source_id
+            WHERE e.event_id = ? AND s.status = 'withdrawn'
+        )
+        """,
+        (event_id,),
+    ).fetchone()
+    if row[0]:
+        return True
+    row = conn.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM event_revisions r2
+            JOIN revision_policy_state ps
+              ON ps.revision_id = r2.revision_id AND ps.valid_to IS NULL
+            WHERE r2.event_id = ? AND ps.availability = 'withdrawn'
+        )
+        """,
+        (event_id,),
+    ).fetchone()
+    return bool(row[0])

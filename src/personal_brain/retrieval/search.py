@@ -107,7 +107,8 @@ SELECT r.revision_id, r.event_id, r.raw_text, r.search_text, r.content_type,
 FROM event_revisions r
 JOIN events e ON e.event_id = r.event_id
 JOIN sources s ON s.source_id = e.source_id
-WHERE EXISTS (
+WHERE s.status != 'withdrawn'
+  AND EXISTS (
     SELECT 1 FROM revision_policy_state ps
     WHERE ps.revision_id = r.revision_id
       AND ps.valid_to IS NULL AND ps.availability = 'available'

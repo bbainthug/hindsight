@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from corpus import retrieval_corpus_conversations
-from synthetic import write_zip
+from synthetic import T0, build_conversation, node, text_message, write_zip
 
 from personal_brain.backup import backup, restore_check
 from personal_brain.history.db import connect
@@ -214,3 +214,117 @@ class TestBackupRestore:
         snap.write_bytes(bytes(data))
         check = restore_check(result.backup_dir)
         assert check.manifest_ok is False
+
+
+class TestWithdrawLifecycleRegression:
+    """验收缺陷 A/B 回归：撤回不可被标注或重复导入隐式解除（§14.1/§14.2.3）。"""
+
+    def _source_id(self, conn) -> str:
+        return conn.execute("SELECT source_id FROM sources").fetchone()["source_id"]
+
+    def _event_id(self, conn, tail: str) -> str:
+        return conn.execute(
+            "SELECT event_id FROM events WHERE event_id LIKE ?", (f"%:{tail}",)
+        ).fetchone()["event_id"]
+
+    def test_label_source_after_withdraw_rejected_not_revive(self, corpus):
+        """缺陷 A：撤回来源后标注操作被拒绝，且不复活内容。"""
+        conn = corpus.conn
+        source_id = self._source_id(conn)
+        withdraw_source(conn, source_id)
+        assert _hit_events(conn, "职业") == set()
+        with pytest.raises(ValueError, match="撤回状态"):
+            label_source(conn, source_id, scope_labels=("career",))
+        assert _hit_events(conn, "职业") == set()  # 仍不可检索
+
+    def test_label_source_after_withdraw_does_not_revive_even_if_allowed(self, corpus):
+        """缺陷 A 核心断言（独立于拒绝路径）：即使来源未整体撤回，
+        事件级撤回的版本也不得被来源级标注复活。"""
+        conn = corpus.conn
+        source_id = self._source_id(conn)
+        withdraw_event(conn, self._event_id(conn, "seek01"))
+        summary = label_source(conn, source_id, scope_labels=("career",))
+        assert summary.skipped_withdrawn >= 1  # 撤回版本被跳过并报告
+        assert _hit_events(conn, "求职") == {"both"}  # seek01 仍不可检索
+        assert "job01" in _hit_events(conn, "职业")  # 其余标注正常生效
+
+    def test_label_event_fully_withdrawn_rejected(self, corpus):
+        conn = corpus.conn
+        ev = self._event_id(conn, "seek01")
+        withdraw_event(conn, ev)
+        with pytest.raises(ValueError, match="撤回状态"):
+            label_event(conn, ev, scope_labels=("x",))
+
+    def test_reimport_edited_export_after_withdraw_stays_withdrawn(self, corpus, tmp_path):
+        """缺陷 B：另一份导出含同事件身份的编辑内容，新版本继承撤回状态。
+
+        §14.2.3：显式"忘记此内容"应覆盖重复来源，不能靠另一份导出保活。
+        """
+        conn = corpus.conn
+        source_id = self._source_id(conn)
+        withdraw_source(conn, source_id)
+        assert _hit_events(conn, "职业") == set()
+
+        # 构造"另一份导出"：同消息 ID（同事件身份）、编辑后的文本、更晚时间
+        m = text_message("job01", "user", "职业方向变化后的全新思考", T0 + 9999)
+        mapping = dict(
+            [
+                node("root3", None, None, ["job01"]),
+                node("job01", m, "root3", []),
+            ]
+        )
+        conv = build_conversation("conv-edited", "编辑导出", T0, mapping, "job01")
+        zp = write_zip([conv], tmp_path / "edited.zip")
+        corpus.importer.import_archive(zp, "testuser")
+
+        # 新版本已入库（证据链保留），但 policy 继承 withdrawn
+        rows = conn.execute(
+            """
+            SELECT ps.availability FROM event_revisions r
+            JOIN revision_policy_state ps
+              ON ps.revision_id = r.revision_id AND ps.valid_to IS NULL
+            WHERE r.event_id LIKE '%:job01' AND r.raw_text LIKE '%全新思考%'
+            """
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["availability"] == "withdrawn"
+        # 检索不可见：新文本与旧关键词都无命中
+        assert _hit_events(conn, "全新思考") == set()
+        assert _hit_events(conn, "职业") == set()
+        # current 已指向新版本（时间更晚），检索仍排除——撤回状态优先
+        cur = conn.execute(
+            "SELECT current_revision_id FROM events WHERE event_id LIKE '%:job01'"
+        ).fetchone()["current_revision_id"]
+        new_rev = conn.execute(
+            "SELECT revision_id FROM event_revisions WHERE raw_text LIKE '%全新思考%'"
+        ).fetchone()["revision_id"]
+        assert cur == new_rev
+
+    def test_event_level_withdraw_blocks_edited_reimport(self, corpus, tmp_path):
+        """缺陷 B 事件级：撤回单事件后，编辑导出的新版本同样继承撤回。"""
+        conn = corpus.conn
+        withdraw_event(conn, self._event_id(conn, "seek01"))
+        m = text_message("seek01", "assistant", "求职进展顺利（修订版）", T0 + 8888)
+        mapping = dict(
+            [
+                node("root4", None, None, ["seek01"]),
+                node("seek01", m, "root4", []),
+            ]
+        )
+        conv = build_conversation("conv-edited2", "编辑导出二", T0, mapping, "seek01")
+        zp = write_zip([conv], tmp_path / "edited2.zip")
+        corpus.importer.import_archive(zp, "testuser")
+        assert _hit_events(conn, "修订版") == set()
+        assert "job01" in _hit_events(conn, "职业")  # 其余内容不受影响
+
+    def test_search_defends_against_status_drift(self, corpus):
+        """防御层：policy 行被手工改回 available 后，withdrawn 来源仍不可检索。"""
+        conn = corpus.conn
+        source_id = self._source_id(conn)
+        withdraw_source(conn, source_id)
+        conn.execute(
+            "UPDATE revision_policy_state SET availability='available' WHERE valid_to IS NULL"
+        )
+        conn.commit()
+        assert _hit_events(conn, "职业") == set()  # sources.status 过滤兜底
+        assert _hit_events(conn, "求职") == set()
