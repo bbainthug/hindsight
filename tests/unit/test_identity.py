@@ -76,7 +76,7 @@ class TestRevisionHash:
             speaker_id="user",
             speaker_type="owner",
             parsed_time=_mk_time(),
-            source_updated_at="2026-08-01T08:01:00Z",
+            source_updated_at="2026-08-01T08:01:00.000000Z",
             attachment_refs=[],
         )
         h1 = compute_revision_hash(**base)
@@ -90,7 +90,7 @@ class TestRevisionHash:
             speaker_id="user",
             speaker_type="owner",
             parsed_time=_mk_time(),
-            source_updated_at="2026-08-01T08:01:00Z",
+            source_updated_at="2026-08-01T08:01:00.000000Z",
             attachment_refs=[],
         )
         changed = dict(base, raw_text="你好（已编辑）")
@@ -103,13 +103,13 @@ class TestRevisionHash:
             speaker_id="user",
             speaker_type="owner",
             parsed_time=_mk_time(),
-            source_updated_at="2026-08-01T08:01:00Z",
+            source_updated_at="2026-08-01T08:01:00.000000Z",
             attachment_refs=[],
         )
         for field, value in [
             ("speaker_id", "assistant"),
             ("content_type", "code"),
-            ("source_updated_at", "2026-08-01T08:02:00Z"),
+            ("source_updated_at", "2026-08-01T08:02:00.000000Z"),
         ]:
             assert compute_revision_hash(**base) != compute_revision_hash(
                 **{**base, field: value}

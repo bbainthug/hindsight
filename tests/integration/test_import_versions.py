@@ -172,6 +172,113 @@ class TestTimeUnknownVersions:
         assert after["current_revision_id"] == before["current_revision_id"]
 
 
+class TestSubSecondOrdering:
+    """亚秒时间戳的版本排序回归（验收缺陷 1）。
+
+    修复前整秒键 `…:00Z` 按字典序反超 `…:00.500Z`（Z 0x5A > . 0x2E），
+    导致旧版本反超成为 current。现时间键为等宽微秒格式，字典序==时间序。
+    """
+
+    def test_older_whole_second_arriving_late_does_not_demote_current(
+        self, importer, tmp_path: Path
+    ):
+        """先导入 T+600.5（半秒后内容），再导入 T+600.0（整秒旧内容）。
+
+        时间上 0.0 < 0.5，旧内容不得反超 current。
+        """
+        z1 = _write_zip(
+            [_edited_conversation("半秒后内容", T0 + 600.5)], tmp_path / "s1.zip"
+        )
+        z2 = _write_zip(
+            [_edited_conversation("整秒旧内容", T0 + 600.0)], tmp_path / "s2.zip"
+        )
+        importer.import_archive(z1, "testuser")
+        eid = event_id_for(importer.conn, "m-0002")
+        importer.import_archive(z2, "testuser")
+
+        event = event_row(importer.conn, eid)
+        assert event["revision_resolution"] == "resolved"
+        current = importer.conn.execute(
+            "SELECT raw_text FROM event_revisions WHERE revision_id=?",
+            (event["current_revision_id"],),
+        ).fetchone()
+        assert current["raw_text"] == "半秒后内容"
+        assert len(revisions_of(importer.conn, eid)) == 2
+
+    def test_newer_sub_second_arriving_late_becomes_current(
+        self, importer, tmp_path: Path
+    ):
+        """先导入 T+600.0，再导入 T+600.5：较新者成为 current。"""
+        z1 = _write_zip(
+            [_edited_conversation("整秒旧内容", T0 + 600.0)], tmp_path / "s1.zip"
+        )
+        z2 = _write_zip(
+            [_edited_conversation("半秒后内容", T0 + 600.5)], tmp_path / "s2.zip"
+        )
+        importer.import_archive(z1, "testuser")
+        eid = event_id_for(importer.conn, "m-0002")
+        importer.import_archive(z2, "testuser")
+
+        event = event_row(importer.conn, eid)
+        assert event["revision_resolution"] == "resolved"
+        current = importer.conn.execute(
+            "SELECT raw_text FROM event_revisions WHERE revision_id=?",
+            (event["current_revision_id"],),
+        ).fetchone()
+        assert current["raw_text"] == "半秒后内容"
+
+    def test_equal_millisecond_different_content_is_conflict(
+        self, importer, tmp_path: Path
+    ):
+        z1 = _write_zip(
+            [_edited_conversation("内容甲", T0 + 600.5)], tmp_path / "s1.zip"
+        )
+        z2 = _write_zip(
+            [_edited_conversation("内容乙", T0 + 600.5)], tmp_path / "s2.zip"
+        )
+        importer.import_archive(z1, "testuser")
+        eid = event_id_for(importer.conn, "m-0002")
+        importer.import_archive(z2, "testuser")
+        event = event_row(importer.conn, eid)
+        assert event["current_revision_id"] is None
+        assert event["revision_resolution"] == "unresolved"
+
+
+class TestUnknownTimeSymmetry:
+    """无时间/有时间版本比较对称化（验收建议采纳：统一为冲突）。"""
+
+    def test_dated_revision_over_undated_is_conflict(self, importer, tmp_path: Path):
+        """已有版本全部未知时间、新版本带已知时间 → 先后不明保留冲突。"""
+        z1 = _write_zip([_undated("无时间版本")], tmp_path / "u1.zip")
+        z2 = _write_zip([_dated("有时间版本", T0 + 600.0)], tmp_path / "u2.zip")
+        importer.import_archive(z1, "testuser")
+        eid = event_id_for(importer.conn, "u-0001")
+        importer.import_archive(z2, "testuser")
+
+        event = event_row(importer.conn, eid)
+        assert event["current_revision_id"] is None
+        assert event["revision_resolution"] == "unresolved"
+        assert len(revisions_of(importer.conn, eid)) == 2
+
+    def test_conflict_resolved_by_strictly_newer_dated(self, importer, tmp_path: Path):
+        """冲突后严格更新的已知时间版本恢复 resolved。"""
+        z1 = _write_zip([_undated("无时间版本")], tmp_path / "u1.zip")
+        z2 = _write_zip([_dated("有时间版本", T0 + 600.0)], tmp_path / "u2.zip")
+        z3 = _write_zip([_dated("更新版本", T0 + 700.0)], tmp_path / "u3.zip")
+        importer.import_archive(z1, "testuser")
+        eid = event_id_for(importer.conn, "u-0001")
+        importer.import_archive(z2, "testuser")
+        importer.import_archive(z3, "testuser")
+
+        event = event_row(importer.conn, eid)
+        assert event["revision_resolution"] == "resolved"
+        current = importer.conn.execute(
+            "SELECT raw_text FROM event_revisions WHERE revision_id=?",
+            (event["current_revision_id"],),
+        ).fetchone()
+        assert current["raw_text"] == "更新版本"
+
+
 def _only_first_message() -> dict:
     """仅包含第一轮（m-0001/a-0001）的对话。"""
     m1 = text_message("m-0001", "user", "我最近正在考虑职业方向变化", T0)
@@ -188,5 +295,11 @@ def _only_first_message() -> dict:
 
 def _undated(text: str) -> dict:
     m = text_message("u-0001", "user", text, None)
+    mapping = dict([node("root", None, None, ["u-0001"]), node("u-0001", m, "root", [])])
+    return build_conversation("conv-undated", "无时间", None, mapping, "u-0001")
+
+
+def _dated(text: str, update_time: float) -> dict:
+    m = text_message("u-0001", "user", text, None, update_time=update_time)
     mapping = dict([node("root", None, None, ["u-0001"]), node("u-0001", m, "root", [])])
     return build_conversation("conv-undated", "无时间", None, mapping, "u-0001")

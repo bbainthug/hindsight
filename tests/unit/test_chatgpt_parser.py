@@ -55,8 +55,8 @@ class TestMessageParsing:
         assert by_id["m-0001"].speaker_type == "owner"
         assert by_id["m-0001"].raw_text == "我最近正在考虑职业方向变化"
         assert by_id["a-0001"].speaker_type == "assistant"
-        assert by_id["m-0001"].created.utc_iso == "2026-08-01T08:00:00Z"
-        assert by_id["a-0002"].updated.utc_iso == "2026-08-01T08:03:00Z"
+        assert by_id["m-0001"].created.utc_iso == "2026-08-01T08:00:00.000000Z"
+        assert by_id["a-0002"].updated.utc_iso == "2026-08-01T08:03:00.000000Z"
 
     def test_parent_and_child_order(self):
         conv, _ = _parse_one(branched_conversation())

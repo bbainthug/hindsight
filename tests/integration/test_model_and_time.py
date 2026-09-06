@@ -23,8 +23,8 @@ class TestTimeSemantics:
         rev = importer.conn.execute(
             "SELECT * FROM event_revisions WHERE event_id=?", (eid,)
         ).fetchone()
-        assert rev["source_created_at"] == "2026-08-01T08:00:00Z"
-        assert rev["source_updated_at"] == "2026-08-01T08:00:00Z"
+        assert rev["source_created_at"] == "2026-08-01T08:00:00.000000Z"
+        assert rev["source_updated_at"] == "2026-08-01T08:00:00.000000Z"
         assert rev["original_time_value"] == "1785571200.0"
         assert rev["time_precision"] == "second"
         assert rev["timezone_status"] == "utc"
@@ -53,8 +53,8 @@ class TestTimeSemantics:
         snap = importer.conn.execute(
             "SELECT coverage_start, coverage_end FROM source_snapshots"
         ).fetchone()
-        assert snap["coverage_start"] == "2026-08-01T08:00:00Z"
-        assert snap["coverage_end"] == "2026-08-01T08:03:00Z"
+        assert snap["coverage_start"] == "2026-08-01T08:00:00.000000Z"
+        assert snap["coverage_end"] == "2026-08-01T08:03:00.000000Z"
 
 
 class TestPolicyStateInitialization:
@@ -87,6 +87,43 @@ class TestSearchTextGeneration:
         ).fetchone()
         assert rev["search_text"] == "我最近正在考虑职业方向变化"
         assert rev["search_text_norm_version"] == "nfkc-casefold-v1"
+
+
+class TestSourceAssetsManifest:
+    def test_member_manifest_persisted(self, importer, tmp_path: Path):
+        """§5.2 步骤 1：归档 manifest 落库为成员级清单（验收建议采纳）。"""
+        zp = write_zip([simple_conversation()], tmp_path / "t.zip")
+        importer.import_archive(zp, "testuser")
+        rows = importer.conn.execute(
+            "SELECT member_path, asset_kind, size_bytes, length(asset_sha256) AS h "
+            "FROM source_assets"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["member_path"] == "conversations.json"
+        assert rows[0]["asset_kind"] == "conversation_data"
+        assert rows[0]["size_bytes"] > 0
+        assert rows[0]["h"] == 64  # sha256 hex
+
+    def test_manifest_not_duplicated_on_reimport(self, importer, tmp_path: Path):
+        zp = write_zip([simple_conversation()], tmp_path / "t.zip")
+        importer.import_archive(zp, "testuser")
+        importer.import_archive(zp, "testuser")
+        assert importer.conn.execute(
+            "SELECT COUNT(*) FROM source_assets"
+        ).fetchone()[0] == 1
+
+
+class TestUnsupportedCountScope:
+    def test_counts_unsupported_content(self, importer, tmp_path: Path):
+        """unsupported_count 统一覆盖 UNSUPPORTED_* 口径。"""
+        zp = write_zip([multimodal_conversation()], tmp_path / "t.zip")
+        result = importer.import_archive(zp, "testuser")
+        # 多模态对话含 1 个不支持的 part（数字 12345）
+        assert result.unsupported_count == 1
+        job = importer.conn.execute(
+            "SELECT unsupported_count FROM import_jobs WHERE status='published'"
+        ).fetchone()
+        assert job["unsupported_count"] == 1
 
 
 class TestAttachments:

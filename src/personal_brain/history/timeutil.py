@@ -55,10 +55,15 @@ def utc_now_iso() -> str:
 
 
 def _format(dt: datetime) -> str:
-    dt = dt.astimezone(UTC)
-    if dt.microsecond:
-        return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    """归一化 UTC 文本：固定 6 位微秒精度。
+
+    等宽格式保证字符串字典序 == 时间序（含亚秒），版本排序键
+    （Python 侧与 SQL `COALESCE` 字符串比较）因此同构可靠，
+    消除 `…:00Z` > `…:00.500Z` 的整秒/亚秒反超。
+    亚微秒差异（低于 float64 秒值的实际精度）截断为相等 →
+    判定为先后不明，保守保留冲突，不产生错误排序。
+    """
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
 def parse_unix_seconds(value: float | int | str) -> ParsedTime:

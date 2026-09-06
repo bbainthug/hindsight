@@ -30,7 +30,11 @@ from personal_brain.importers.chatgpt import (
     find_conversation_members,
     parse_conversation,
 )
-from personal_brain.importers.models import IncomingConversation, JobError
+from personal_brain.importers.models import (
+    IncomingConversation,
+    JobError,
+    MemberManifest,
+)
 
 SOURCE_KIND = "chatgpt"
 _NAMESPACE_ALPHABET = set(
@@ -128,9 +132,14 @@ class ChatGPTImporter:
         recorded_at = utc_now_iso()
         errors: list[JobError] = []
         try:
-            conversations, parse_status, coverage_start, coverage_end, coverage_notes = (
-                self._parse(reader, errors)
-            )
+            (
+                conversations,
+                parse_status,
+                coverage_start,
+                coverage_end,
+                coverage_notes,
+                member_manifest,
+            ) = self._parse(reader, errors)
         except Exception:
             self._mark_failed(source_id, ns, archive_sha256, recorded_at)
             raise
@@ -150,6 +159,7 @@ class ChatGPTImporter:
                 coverage_start=coverage_start,
                 coverage_end=coverage_end,
                 coverage_notes=coverage_notes,
+                member_manifest=member_manifest,
             )
         except BaseException:
             # 发布阶段失败同样不发布成功状态（§5.2 步骤 2）
@@ -176,10 +186,26 @@ class ChatGPTImporter:
 
     def _parse(
         self, reader: ArchiveReader, errors: list[JobError]
-    ) -> tuple[list[IncomingConversation], str, str | None, str | None, str | None]:
-        """在暂存数据上解析；返回 (对话列表, parse_status, coverage, notes)。"""
+    ) -> tuple[
+        list[IncomingConversation],
+        str,
+        str | None,
+        str | None,
+        str | None,
+        list[MemberManifest],
+    ]:
+        """在暂存数据上解析；返回 (对话, parse_status, coverage, notes, 成员清单)。"""
+        manifest: list[MemberManifest] = []
         raw_members: list[tuple[str, bytes]] = []
         for member in reader.members():
+            manifest.append(
+                MemberManifest(
+                    member_path=member.member_path,
+                    sha256=member.sha256,
+                    size_bytes=member.size_bytes,
+                    kind="other",
+                )
+            )
             try:
                 data = reader.open_member(member.member_path)
             except Exception as exc:  # 单成员读取失败 → partial，不中断
@@ -197,6 +223,10 @@ class ChatGPTImporter:
         errors.extend(detect_errors)
         if not conv_members:
             raise ValueError("未找到对话数据（NO_CONVERSATION_DATA）")
+        conv_paths = {p for p, _ in conv_members}
+        for m in manifest:
+            if m.member_path in conv_paths:
+                m.kind = "conversation_data"
 
         conversations: list[IncomingConversation] = []
         conversation_failures = 0
@@ -252,7 +282,7 @@ class ChatGPTImporter:
             notes = f"存在未完全解析的结构；对话失败数={conversation_failures}"
 
         coverage_start, coverage_end = self._coverage(conversations)
-        return conversations, parse_status, coverage_start, coverage_end, notes
+        return conversations, parse_status, coverage_start, coverage_end, notes, manifest
 
     @staticmethod
     def _coverage(

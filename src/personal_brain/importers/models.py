@@ -51,6 +51,15 @@ class IncomingConversation(BaseModel):
     nodes: list[IncomingMessage] = Field(default_factory=list)
 
 
+class MemberManifest(BaseModel):
+    """归档成员级清单（§5.2 步骤 1：manifest 与摘要）。"""
+
+    member_path: str
+    sha256: str
+    size_bytes: int
+    kind: str = "other"  # conversation_data | attachment | metadata | other
+
+
 class JobError(BaseModel):
     """结构化错误（不含正文）。"""
 

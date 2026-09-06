@@ -93,6 +93,22 @@ class TestSharedBranchAncestors:
 
 
 class TestUnknownActivePath:
+    def test_dangling_parent_chain_marks_unknown(self, importer, tmp_path: Path):
+        """回归（验收建议采纳）：父链悬空（父节点在 mapping 外）时
+        不能把孤立节点当根 → active_path_unknown，不写猜测路径。"""
+        conv = branched_conversation()
+        # 断开 b-0001 与其父 root：root 节点从 mapping 移除，父链悬空
+        del conv["mapping"]["root"]
+        zp = write_zip([conv], tmp_path / "dp.zip")
+        importer.import_archive(zp, "testuser")
+        cs = _conv_snapshot_row(importer.conn, "conv-branch")
+        assert cs["active_path_known"] == 0
+        n_paths = importer.conn.execute(
+            "SELECT COUNT(*) FROM conversation_selected_path WHERE conv_snapshot_id=?",
+            (cs["conv_snapshot_id"],),
+        ).fetchone()[0]
+        assert n_paths == 0
+
     def test_missing_current_node_marks_unknown(self, importer, tmp_path: Path):
         """无法确定所选路径 → active_path_unknown，不暗中猜测（§4.3）。"""
         conv = branched_conversation()

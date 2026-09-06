@@ -137,7 +137,9 @@ class DirectoryArchiveReader(ArchiveReader):
                 fp = Path(dirpath) / fn
                 if fp.is_symlink():
                     target = fp.resolve()
-                    if not str(target).startswith(str(root_real)):
+                    # is_relative_to 做真正的路径包含判断；
+                    # 字符串前缀匹配会把 "export-evil" 误判为 "export" 根内
+                    if not target.is_relative_to(root_real):
                         raise ArchiveRejected(f"符号链接逃逸: {fn!r}")
                 if not fp.is_file():
                     continue

@@ -69,6 +69,34 @@ class TestPathTraversal:
         with pytest.raises(ArchiveRejected, match="逃逸|穿越"):
             open_archive(src, _tiny_limits())
 
+    def test_prefix_sharing_sibling_symlink_rejected(self, tmp_path: Path):
+        """回归（验收缺陷 2）：兄弟目录名共享前缀（export-evil vs export）
+        时，字符串 startswith 前缀匹配曾把逃逸误判为根内。"""
+        src = tmp_path / "export"
+        src.mkdir()
+        (src / "conversations.json").write_text(
+            json.dumps([simple_conversation()]), encoding="utf-8"
+        )
+        evil = tmp_path / "export-evil"
+        evil.mkdir()
+        (evil / "secret-data.json").write_text("escaped content", encoding="utf-8")
+        (src / "leak.json").symlink_to(evil / "secret-data.json")
+        with pytest.raises(ArchiveRejected, match="逃逸"):
+            open_archive(src, _tiny_limits())
+
+    def test_inside_root_symlink_allowed(self, tmp_path: Path):
+        """根内指向根内的符号链接是合法别名，不拒绝。"""
+        src = tmp_path / "export"
+        (src / "sub").mkdir(parents=True)
+        real = src / "conversations.json"
+        real.write_text(json.dumps([simple_conversation()]), encoding="utf-8")
+        link = src / "sub" / "alias.json"
+        link.symlink_to(real)
+        reader = open_archive(src, _tiny_limits())
+        names = {m.member_path for m in reader.members()}
+        assert "conversations.json" in names
+        assert "sub/alias.json" in names
+
 
 class TestResourceLimits:
     def test_total_size_limit(self, tmp_path: Path):

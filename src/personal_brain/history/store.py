@@ -20,9 +20,17 @@ from personal_brain.history.identity import (
     revision_id_for,
 )
 from personal_brain.history.timeutil import ParsedTime
-from personal_brain.importers.models import IncomingConversation, IncomingMessage, JobError
+from personal_brain.importers.models import (
+    IncomingConversation,
+    IncomingMessage,
+    JobError,
+    MemberManifest,
+)
 
 POLICY_VERSION_INITIAL = "v0"
+
+# 计入 unsupported_count 的错误码口径：所有"结构不支持/未解析"类错误
+_UNSUPPORTED_CODES = {"UNSUPPORTED_CONTENT", "UNSUPPORTED_NODE", "UNSUPPORTED_CONVERSATION"}
 
 
 @dataclass
@@ -89,6 +97,10 @@ def resolve_current(
     - 新版本键 == 最大键但内容不同（hash 不同才会走到这里）→ 先后不明，
       current=NULL、unresolved，双方版本都保留，禁止后续自动激活记忆。
     - 新版本时间未知且事件已有版本 → 无法比较 → unresolved。
+    - 已有版本全部未知时间且新版本带已知时间 → 同样无法证明有序 →
+      unresolved（与上一条对称，保守处理）。
+
+    键为等宽 UTC 微秒格式，字典序 == 时间序（含亚秒）。
 
     返回 (becomes_current, resolution)。
     """
@@ -98,7 +110,9 @@ def resolve_current(
     if new_key is None:
         return False, "unresolved"
     if not known:
-        return True, "resolved"
+        # 已有版本全部未知时间：与「新版本无时间」对称，统一为先后不明
+        # （§5.3 版本先后不明保留冲突；保守处理，禁止后续自动激活的前提）
+        return False, "unresolved"
     max_known = max(known)
     if new_key > max_known:
         return True, "resolved"
@@ -122,13 +136,16 @@ def publish_snapshot(
     coverage_start: str | None,
     coverage_end: str | None,
     coverage_notes: str | None,
+    member_manifest: list[MemberManifest] | None = None,
 ) -> PublishResult:
     """在单一事务中发布快照；任何异常回滚，不产生部分可见状态。"""
     source_id = derive_source_id(source_kind, account_namespace)
     snapshot_id = derive_snapshot_id(source_id, archive_sha256)
 
     counts = PublishCounts()
-    counts.unsupported_count = sum(1 for e in errors if e.code == "UNSUPPORTED_CONTENT")
+    counts.unsupported_count = sum(
+        1 for e in errors if e.code in _UNSUPPORTED_CODES
+    )
 
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -163,6 +180,22 @@ def publish_snapshot(
                 coverage_notes,
             ),
         )
+
+        for asset in member_manifest or []:
+            conn.execute(
+                """
+                INSERT INTO source_assets (
+                    snapshot_id, member_path, asset_sha256, size_bytes, asset_kind
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    asset.member_path,
+                    asset.sha256,
+                    asset.size_bytes,
+                    asset.kind,
+                ),
+            )
 
         job_id = uuid.uuid4().hex
         conn.execute(
@@ -334,6 +367,9 @@ def _write_selected_path(
     不写路径行，不暗中猜测（§4.3）。
     """
     known_nodes = {n.node_id for n in conv.nodes}
+    declared_parent = {
+        n.node_id: n.parent_node_id for n in conv.nodes if n.parent_node_id
+    }
     if conv.current_node_id is None or conv.current_node_id not in known_nodes:
         conn.execute(
             "UPDATE conversation_snapshots SET active_path_known=0 WHERE conv_snapshot_id=?",
@@ -349,6 +385,11 @@ def _write_selected_path(
             return  # 环：视为路径未知，保持 active_path_known=0
         seen.add(cur)
         chain.append(cur)
+        declared = declared_parent.get(cur)
+        if declared is not None and declared not in known_nodes:
+            # 父链悬空（父节点在 mapping 外）：锚点不是真实根，
+            # 路径不可信 → active_path_unknown，不写猜测路径（§4.3）
+            return
         cur = parent_of.get(cur)
 
     chain.reverse()  # 根 → 叶
