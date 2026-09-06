@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv-cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# 数据库与私有数据（工作约定：真实聊天、密钥、数据库不得提交 Git）
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+/private-data/
+/data/
+*.zip
+
+# 系统
+.DS_Store
