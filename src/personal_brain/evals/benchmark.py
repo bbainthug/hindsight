@@ -15,7 +15,7 @@ import sqlite3
 import statistics
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from personal_brain.mcp_server.service import (
@@ -106,9 +106,8 @@ def default_queries() -> list[BenchQuery]:
         BenchQuery("search_unique_token", "search", {"query": "主题00042号"},
                    disclosed_separately=True),
         BenchQuery(
-            "recent_7d", "recent", {"days": 7, "limit": 10,
-                                    "now": "2025-08-20T08:00:00+00:00"}
-        ),
+            "recent_7d", "recent", {"days": 7, "limit": 10}
+        ),  # now 运行时从库内最大消息时间推导（写死日期会随语料漂移而 0 命中）
         # 短词扫描（回退路径）——单独披露
         BenchQuery("fallback_single_hanzi_安", "search", {"query": "安"},
                    disclosed_separately=True),
@@ -145,6 +144,10 @@ def run_benchmark(
         args = dict(bq.args)
         if bq.kind == "get_event":
             args.setdefault("event_id", sample_event_id)
+        if bq.kind == "recent" and "now" not in args:
+            # recent 窗口锚定库内最大消息时间（写死日期会随语料漂移而 0 命中，
+            # 丢失结果物化路径的覆盖——验收建议 4）
+            args["now"] = _corpus_reference_time(conn)
         # 预热 2 次（页缓存 + SQLite statement cache）
         try:
             for _ in range(2):
@@ -190,6 +193,18 @@ def run_benchmark(
         and all(r.error is None for r in common)
     )
     return report
+
+
+def _corpus_reference_time(conn) -> str:
+    """recent 窗口参考点：库内最大消息时间 + 1 天（ISO 带 +00:00）。"""
+    row = conn.execute(
+        "SELECT MAX(source_created_at) AS m FROM event_revisions"
+        " WHERE source_created_at IS NOT NULL"
+    ).fetchone()
+    if row is None or not row["m"]:
+        return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    base = datetime.fromisoformat(str(row["m"]).replace("Z", "+00:00"))
+    return (base + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
 def _row_counts(conn) -> dict[str, int]:

@@ -64,10 +64,53 @@ class EvalSuite:
     profile: AccessProfile
     cases: tuple[EvalCase, ...]
     source_path: str = ""
+    requires: dict = field(default_factory=dict)
 
 
 class SuiteValidationError(ValueError):
     """套件结构非法：拒绝执行而非猜测语义。"""
+
+
+# 前置条件键（验收建议 2：套件环境不匹配必须 fail-fast，不能伪装成检索失败）
+_REQUIRES_INT_KEYS = (
+    "min_sources",
+    "max_sources",
+    "min_events",
+    "min_labeled_events",
+    "min_unlabeled_events",
+)
+_REQUIRES_LABEL_KEYS = ("required_scope_labels", "required_sensitivity_labels")
+
+
+def _parse_requires(raw: object) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise SuiteValidationError("requires 必须是映射")
+    unknown = set(raw) - set(_REQUIRES_INT_KEYS) - set(_REQUIRES_LABEL_KEYS)
+    if unknown:
+        raise SuiteValidationError(
+            f"requires 含未知键: {sorted(unknown)}；"
+            f"允许 {_REQUIRES_INT_KEYS + _REQUIRES_LABEL_KEYS}"
+        )
+    out: dict = {}
+    for key in _REQUIRES_INT_KEYS:
+        if key in raw:
+            value = raw[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise SuiteValidationError(f"requires.{key} 必须是非负整数")
+            out[key] = value
+    for key in _REQUIRES_LABEL_KEYS:
+        if key in raw:
+            value = raw[key]
+            if (
+                not isinstance(value, list)
+                or not value
+                or not all(isinstance(x, str) and x for x in value)
+            ):
+                raise SuiteValidationError(f"requires.{key} 必须是非空字符串列表")
+            out[key] = list(value)
+    return out
 
 
 def profile_from_suite(raw: dict) -> AccessProfile:
@@ -162,4 +205,5 @@ def load_suite(path: Path) -> EvalSuite:
         profile=profile,
         cases=cases,
         source_path=str(path),
+        requires=_parse_requires(raw.get("requires")),
     )

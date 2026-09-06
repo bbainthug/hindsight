@@ -1,13 +1,21 @@
 {
   "schema_version": "0.2",
   "name": "dev-synthetic-policy",
-  "note": "合成开发集·策略对抗卷：agent profile（career scope + deny secret + 不开放未分类）。要求评测环境：全部语料标注 career、sec01 追加 secret、另导入一份未标注来源。运行器断言：越权/按 ID/计数不泄露（§9.1 权限类）。",
+  "note": "合成开发集·策略对抗卷：agent profile（career scope + deny secret + 不开放未分类）。前置条件（requires 自动检查）：①导入语料并 label-source 标注 career；②label-event 给 sec01 追加 secret；③再导入一份同语料的未标注来源。顺序不能反。",
   "profile": {
     "name": "agent-eval",
     "allow_scopes": ["career"],
     "deny_sensitivity": ["secret"],
     "allow_unclassified": false,
     "delivery_boundary": "local_only"
+  },
+  "requires": {
+    "min_sources": 2,
+    "min_events": 20,
+    "min_labeled_events": 10,
+    "min_unlabeled_events": 10,
+    "required_scope_labels": ["career"],
+    "required_sensitivity_labels": ["secret"]
   },
   "cases": [
     { "id": "adv-01", "type": "adversarial", "query": "系统安全",

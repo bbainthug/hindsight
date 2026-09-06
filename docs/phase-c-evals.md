@@ -37,6 +37,25 @@ uv run brain --db /tmp/bench.sqlite --archive-dir /tmp/archives --json bench \
 | 10 万条预热 P95 ≤ 1s | `brain bench` | 见 `docs/evals/benchmark-100k.json` |
 | 短词扫描单独披露 | bench `disclosed_separately` | 见报告 |
 
+## 套件前置条件（验收建议 2）
+
+套件可用 `requires` 声明环境前置，runner 在跑用例前自动检查，不满足即 fail-fast
+并逐条说明缺什么——**红色失败只代表真实缺陷，不再与"环境配错"混淆**：
+
+| 键 | 含义 |
+|---|---|
+| `min_sources` / `max_sources` | 来源数上下界 |
+| `min_events` | 事件总数下界（防空库/错库） |
+| `min_labeled_events` | 已标注（classification_status ≠ unclassified）事件数下界 |
+| `min_unlabeled_events` | 未标注事件数下界（策略卷需要未标注来源验证计数不泄露） |
+| `required_scope_labels` / `required_sensitivity_labels` | 必须存在的标签 |
+
+两个开发套件的既定前置：
+- **语义卷** `dev-synthetic.json`：`max_sources: 1`（单来源环境；多来源会污染期望集合与 selected 路径解析）。
+- **策略卷** `dev-synthetic-policy.json`：双来源 + 已标注（≥10 labeled、≥10 unlabeled、career 与 secret 标签在库）。**准备顺序**：导入语料 → `label-source` 标 career → `label-event` 给 sec01 追加 secret → 再导入第二份未标注来源（顺序不能反）。
+
+真实私有套件（`evals/private/`）建议按真实环境声明 requires，例如 `min_labeled_events` 取你实际标注后的事件数下界。
+
 ## 真实标注问题集（用户制品，§9.1）
 
 - 保存于 **Git 外**私有评测目录：`evals/private/`（已 .gitignore）。
@@ -50,3 +69,5 @@ uv run brain --db /tmp/bench.sqlite --archive-dir /tmp/archives --json bench \
 - 评测为检索级（证据列表），不含答案生成与 token 成本——token 成本属 §9.3 Memory 对照（Phase D+，Memory 未实现）。
 - 人工复核无法自动化，报告只输出材料。
 - **短词回退扫描在 10 万条规模下超过 §6.3 `max_scan` 资源上限时诚实拒绝（QUERY_TOO_BROAD）而非全表扫描**——基准记录该拒绝并单独披露；这不是缺陷而是资源边界保护。缩短时间范围或限定来源可缩小扫描集。
+- 基准语料保证**每条常用查询命中 ≥10 条**（生成器含连续 "AI工程选型" 主题与会话首条 "你好，世界" 问候；recent 窗口锚定库内最大消息时间），使 snippet/偏移映射/citation/文本预算的**结果物化路径**被全部常用查询覆盖，而非只有「职业」系列（验收建议 4）。
+- 测量方差提示：共享机器上 P95 波动可达 ±25%（实测同代码 746–1047ms 区间）；正文懒加载后典型值 ~750ms、p99<1s。跑门槛前保持机器无负载，如实记录波动。

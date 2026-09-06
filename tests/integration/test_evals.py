@@ -129,6 +129,74 @@ class TestCitationResolver:
         assert resolve_citation(conn, f"pb:{rev}", SearchFilters()) is None
 
 
+class TestPreconditions:
+    """验收建议 2：套件环境不匹配必须 fail-fast，不能伪装成检索失败。"""
+
+    def _bare_env(self, tmp_path: Path):
+        """单来源、未标注语料。"""
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        conn = connect(tmp_path / "brain.sqlite")
+        importer = ChatGPTImporter(conn, archive_dir)
+        zp = write_zip(retrieval_corpus_conversations(), tmp_path / "a.zip")
+        importer.import_archive(zp, "testuser")
+        return conn, importer, tmp_path
+
+    def test_policy_suite_on_bare_corpus_fails_fast(self, tmp_path):
+        """裸库跑策略卷：前置拦截，不产生 3/6 的伪越权红色失败。"""
+        conn, _, _ = self._bare_env(tmp_path)
+        try:
+            report = run_suite(
+                conn, load_suite(SUITE_DIR / "dev-synthetic-policy.json")
+            )
+            assert report.passed is False
+            assert report.cases == []  # 未跑任何用例
+            assert report.precondition_failures
+            assert any("已标注" in m for m in report.precondition_failures)
+            assert any("来源" in m for m in report.precondition_failures)
+        finally:
+            conn.close()
+
+    def test_semantic_suite_two_sources_fails_fast(self, labeled_env):
+        """双来源库跑语义卷：前置拦截（max_sources=1）。"""
+        zp = write_zip(retrieval_corpus_conversations(), labeled_env.tmp_path / "b.zip")
+        labeled_env.importer.import_archive(zp, "other")
+        report = run_suite(labeled_env.conn, load_suite(SUITE_DIR / "dev-synthetic.json"))
+        assert report.cases == []
+        assert any("≤1 个来源" in m for m in report.precondition_failures)
+
+    def test_policy_suite_missing_second_source_fails_fast(self, labeled_env):
+        """已标注但缺未标注第二来源：前置拦截（min_unlabeled_events）。"""
+        report = run_suite(
+            labeled_env.conn, load_suite(SUITE_DIR / "dev-synthetic-policy.json")
+        )
+        assert report.cases == []
+        assert any("未标注事件" in m for m in report.precondition_failures)
+
+    def test_valid_env_still_runs_cases(self, labeled_env):
+        """前置满足时用例照常运行（补齐未标注第二来源后非空）。"""
+        zp = write_zip(retrieval_corpus_conversations(), labeled_env.tmp_path / "b.zip")
+        labeled_env.importer.import_archive(zp, "other")
+        report = run_suite(
+            labeled_env.conn, load_suite(SUITE_DIR / "dev-synthetic-policy.json")
+        )
+        assert report.precondition_failures == []
+        assert len(report.cases) == 6
+
+    def test_unknown_requires_key_rejected(self, tmp_path):
+        raw = {
+            "schema_version": "0.2",
+            "name": "t",
+            "profile": {"allow_scopes": ["*"]},
+            "requires": {"no_such_key": 1},
+            "cases": [{"id": "c1", "type": "keyword", "query": "职业"}],
+        }
+        p = tmp_path / "s.json"
+        p.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        with pytest.raises(SuiteValidationError, match="未知键"):
+            load_suite(p)
+
+
 class TestDevSuites:
     def test_semantic_suite_passes(self, labeled_env):
         suite = load_suite(SUITE_DIR / "dev-synthetic.json")

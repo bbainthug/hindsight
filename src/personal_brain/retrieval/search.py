@@ -99,11 +99,7 @@ class SearchResult:
     )
 
 
-_BASE_SQL = """
-SELECT r.revision_id, r.event_id, r.raw_text, r.search_text, r.content_type,
-       r.source_created_at, r.source_locator,
-       e.conversation_id, e.speaker_id, e.speaker_type,
-       e.current_revision_id, s.account_namespace, s.source_id
+_BASE_FROM_WHERE = """
 FROM event_revisions r
 JOIN events e ON e.event_id = r.event_id
 JOIN sources s ON s.source_id = e.source_id
@@ -114,10 +110,24 @@ WHERE s.status != 'withdrawn'
       AND ps.valid_to IS NULL AND ps.availability = 'available'
 )
 """
+# raw_text 不进 search 池查询（§9.2 规模）：候选可达数万行，正文仅页内
+# ≤limit 行需要，页确定后按 revision_id 补取——显著降低每次查询的
+# I/O 与对象物化成本。recent 路径只取 limit+1 行，正文列直接带上。
 
 
-def _filter_sql(filters: SearchFilters, params: list) -> str:
-    sql = _BASE_SQL
+def _filter_sql(
+    filters: SearchFilters, params: list, *, include_raw_text: bool = False
+) -> str:
+    columns = (
+        "SELECT r.revision_id, r.event_id, r.raw_text, r.search_text, r.content_type,"
+        " r.source_created_at, r.source_locator, e.conversation_id, e.speaker_id,"
+        " e.speaker_type, e.current_revision_id, s.account_namespace, s.source_id"
+        if include_raw_text
+        else "SELECT r.revision_id, r.event_id, r.search_text, r.content_type,"
+        " r.source_created_at, r.source_locator, e.conversation_id, e.speaker_id,"
+        " e.speaker_type, e.current_revision_id, s.account_namespace, s.source_id"
+    )
+    sql = columns + _BASE_FROM_WHERE
     if filters.date_from is not None:
         sql += " AND r.source_created_at IS NOT NULL AND r.source_created_at >= ?"
         params.append(filters.date_from)
@@ -452,7 +462,7 @@ def search_history(
                 source_created_at=row["source_created_at"],
                 time_known=row["source_created_at"] is not None,
                 score=score,
-                raw_text=row["raw_text"],
+                raw_text=None,  # 懒加载：页确定后按 revision_id 补取
                 source_locator=row["source_locator"],
                 match_span=span,
             )
@@ -463,6 +473,20 @@ def search_history(
     start_index = _cursor_start(hits, cursor, order) if cursor else 0
     page = hits[start_index : start_index + eff_limit]
     truncated = (start_index + eff_limit) < total_matched
+
+    # 页内正文补取（懒加载）：只对 ≤limit 行取 raw_text（§9.2 规模）
+    if page:
+        page_ids = [h.revision_id for h in page]
+        texts = {
+            r["revision_id"]: r["raw_text"]
+            for r in conn.execute(
+                "SELECT revision_id, raw_text FROM event_revisions"
+                " WHERE revision_id IN (" + ",".join("?" for _ in page_ids) + ")",
+                page_ids,
+            ).fetchall()
+        }
+        for hit in page:
+            hit.raw_text = texts.get(hit.revision_id)
 
     # 页内富化：snippet（原文偏移映射，锚定命中处）+ 出现位置（来源追溯）
     for hit in page:
@@ -564,7 +588,7 @@ def recent_events(
         allow_unclassified=filters.allow_unclassified,
     )
     params: list = []
-    sql = _filter_sql(eff_filters, params)
+    sql = _filter_sql(eff_filters, params, include_raw_text=True)
     # keyset 游标：(source_created_at, revision_id) 降序；等宽 ISO 字典序=时间序。
     # 空间键 9 的补数不可用于跨字母字符串，直接用降序条件而非倒序索引键。
     if cursor:

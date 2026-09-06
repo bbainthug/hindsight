@@ -405,6 +405,12 @@ def cmd_eval(args, cfg: BrainConfig, as_json: bool) -> int:
     out = _json.dumps(asdict(report), ensure_ascii=False, indent=2)
     if as_json:
         print(out)
+    elif report.precondition_failures:
+        print(f"评测套件 {report.suite_name}: 未运行——套件前置条件不满足")
+        for msg in report.precondition_failures:
+            print(f"  - {msg}")
+        print("  （先按上述说明准备环境，再重跑；红色失败只应代表真实缺陷）")
+        return 1
     else:
         gates = report.summary["gates"]
         print(f"评测套件 {report.suite_name}: {'通过' if report.passed else '未通过'}")

@@ -9,6 +9,10 @@
     "deny_sensitivity": [],
     "delivery_boundary": "local_only"
   },
+  "requires": {
+    "max_sources": 1,
+    "min_events": 10
+  },
   "cases": [
     { "id": "kw-01", "type": "keyword", "query": "职业",
       "acceptable_event_ids": ["chatgpt:testuser:job01", "chatgpt:testuser:rel01", "chatgpt:testuser:both", "chatgpt:testuser:early", "chatgpt:testuser:undat"],

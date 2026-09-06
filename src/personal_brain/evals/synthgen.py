@@ -17,7 +17,7 @@ from pathlib import Path
 
 T0 = 1754035200.0  # 2025-08-01T08:00:00Z（生成语料时间基点）
 
-_TOPICS = ["职业方向", "系统安全", "AI 工程选型", "求职进展", "学习方法", "项目排期"]
+_TOPICS = ["职业方向", "系统安全", "AI工程选型", "求职进展", "学习方法", "项目排期"]
 _COMMON = ["职业", "安全", "AI", "求职", "工程", "学习", "项目"]
 
 
@@ -58,8 +58,11 @@ def generate_conversations(
             topic = _TOPICS[(cid + mid) % len(_TOPICS)]
             common = _COMMON[(cid + mid) % len(_COMMON)]
             role = "user" if mid % 3 != 1 else "assistant"
+            # 会话首条问候语保证标点查询（你好，世界）在高频词分布外稳定命中，
+            # 使基准每条常用查询都有结果物化路径（snippet/offset/citation）可测。
+            greeting = "你好，世界。" if mid == 0 else ""
             text = (
-                f"主题{cid}号第{mid}条：{topic}与{common}相关的讨论，"
+                f"{greeting}主题{cid}号第{mid}条：{topic}与{common}相关的讨论，"
                 f"编号U{cid}M{mid}，随机参考{rng.randrange(10**6)}"
             )
             create += 60 + (mid % 7)

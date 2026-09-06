@@ -40,7 +40,9 @@
 | 29 | **MCP 计数不泄露**：total_matched/undated_excluded/brain_status 覆盖期与来源列表只在授权过滤后的集合上统计；不支持结构等解析警告只报存在性不报数量/位置 | §7.3「邻接、标题、计数也必须经过权限检查」「不泄露隐藏记录数量」 | — |
 | 30 | **get_event 授权与上下文**：按事件逐次重新授权（无权限与不存在同为 NOT_FOUND_OR_NOT_ALLOWED）；context_radius 沿所选路径取邻接并逐条授权，未授权邻接静默略去（不计数量）；speaker_id 仅在事件已授权时返回；检索结果只给 snippet 不给正文（正文走 get_event）；定位符只含 snapshot_id/node_id | §7.3/§8.1 | — |
 | 31 | **MCP SDK 与传输**：官方 python-sdk v2（低层 Server + on_list_tools/on_call_tool），stdio 传输；服务端无网络监听、无远程调用 | §7.1 首版本机 stdio；§7.5 无服务端 LLM | — |
-| 32 | **FTS 行 rowid 化（规模门槛修复）**：FTS5 `DELETE FROM ... WHERE revision_id=?` 按非 rowid 列删除会全扫索引 → 导入 O(n²)（10 万条 15 分钟+）；迁移 4 改为 `rowid = sha256(revision_id) 前 8 字节 & 2^63-1` 作主键，`INSERT OR REPLACE` 按 rowid（O(log n)）；实测 10 万条导入 19.7s | §9.2 门槛 7 实测触发；L3 可从 L1 重建的性质保证迁移可逆（§3.2） | rowid 冲突概率 ~2^-63 可忽略；`fts_rowid` 注册于连接工厂，迁移与运行期同一实现 |
+| 32 | **FTS 行 rowid 化（规模门槛修复）**：FTS5 `DELETE FROM ... WHERE revision_id=?` 按非 rowid 列删除会全扫索引 → 导入 O(n²)（10 万条 15 分钟+）；迁移 4 改为 `rowid = sha256(revision_id) 前 8 字节 & 2^63-1` 作主键，`INSERT OR REPLACE` 按 rowid（O(log n)）；实测 10 万条导入 19.7s | §9.2 门槛 7 实测触发；L3 可从 L1 重建的性质保证迁移可逆（§3.2） | rowid 冲突概率 ~3×10⁻¹⁰ 可忽略；`fts_rowid` 注册于连接工厂，迁移与运行期同一实现 |
+| 33 | **套件前置条件声明**：suite `requires`（来源数/事件数/已标注与未标注下界/必需标签），runner 跑用例前检查，不满足 fail-fast 并逐条说明 | 验收报告建议 2：裸库跑策略卷/双来源跑语义卷的失败形态与真实越权漏洞一模一样，红色失败脱敏比浪费时间更危险 | 检查只读元数据计数；requires 键白名单，未知键拒绝加载 |
+| 34 | **基准语料物化覆盖**：生成器含连续 "AI工程选型" 与会话首条 "你好，世界"，recent 窗口锚定库内最大消息时间——每条常用查询命中 ≥10，snippet/偏移映射/citation/文本预算路径全覆盖；另将 search 池查询改为**正文懒加载**（池 SELECT 不含 raw_text，页确定后按 revision_id 补取；recent 路径仅 limit+1 行故保留正文列） | 验收报告建议 4：命中 0 的查询只测扫描路径，门槛数字偏乐观；正文懒加载降低每次查询 I/O 与对象物化成本，加大 1s 门槛余量 | 差分测试保护匹配集不变；页内正文补取由 snippet 测试覆盖 |
 
 ## 已知限制（本切片内不做、不假装已做）
 
@@ -98,6 +100,7 @@
 ## Phase C 交付记录（真实样本评测与性能门槛）
 
 - `evals/suite.py`：§9.1 全字段套件模式（query/profile/时间分支条件/可接受证据 revision 集/必须区分语义/禁止结论/允许拒答/预期访问结果/归属断言）——**不是 expected_contains 关键词检查**；结构非法拒绝执行。
+- **验收修复（建议 2/4）**：套件 `requires` 前置条件 fail-fast（决策 33）；基准语料每条常用查询命中 ≥10 覆盖物化路径（决策 34）；`eval --json` 改 asdict 真 JSON；ruff 4 错修复。
 - `evals/runner.py`：Recall@10、多证据覆盖、citation 100% 解析、禁止访问断言、拒答全过 + 正常回答率（防全拒答作弊）、失败分类（recall_fail/citation_unresolved/forbidden_access/attribution_mismatch/unexpected_empty）、人工复核输出段（归属表 + 区分语义）。
 - `evals/citation.py`：`pb:{revision_id}` 解析到正确版本（revision_id 自含 event_id）；不可解析/不可访问统一 None（防探测）。
 - `evals/synthgen.py`：种子确定合成生成器，消息 ID 全源唯一（事件 ID 含 message_id）；生成物必须通过真实导入器（契约测试）。

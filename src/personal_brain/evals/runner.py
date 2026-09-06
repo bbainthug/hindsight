@@ -55,6 +55,88 @@ class EvalReport:
     cases: list[CaseResult] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
     human_review: list[dict] = field(default_factory=list)
+    precondition_failures: list[str] = field(default_factory=list)
+
+
+def check_preconditions(conn: sqlite3.Connection, suite: EvalSuite) -> list[str]:
+    """套件环境前置检查（验收建议 2）：不满足即 fail-fast。
+
+    背景：策略卷缺标注/缺第二来源、语义卷混入第二来源时，失败形态与
+    真实越权漏洞一模一样——必须在跑用例前拦下并说明缺什么。
+    """
+    req = suite.requires
+    if not req:
+        return []
+    failures: list[str] = []
+
+    n_sources = conn.execute("SELECT COUNT(*) c FROM sources").fetchone()["c"]
+    n_events = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
+    labeled = conn.execute(
+        """
+        SELECT COUNT(DISTINCT r.event_id) c FROM event_revisions r
+        JOIN revision_policy_state ps
+          ON ps.revision_id = r.revision_id AND ps.valid_to IS NULL
+        WHERE ps.classification_status != 'unclassified'
+        """
+    ).fetchone()["c"]
+    unlabeled = conn.execute(
+        """
+        SELECT COUNT(DISTINCT r.event_id) c FROM event_revisions r
+        JOIN revision_policy_state ps
+          ON ps.revision_id = r.revision_id AND ps.valid_to IS NULL
+        WHERE ps.classification_status = 'unclassified'
+        """
+    ).fetchone()["c"]
+    scope_labels = {
+        row["label"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT sl.label FROM revision_scope_labels sl
+            JOIN revision_policy_state ps
+              ON ps.state_id = sl.state_id AND ps.valid_to IS NULL
+            """
+        )
+    }
+    sensitivity_labels = {
+        row["label"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT se.label FROM revision_sensitivity_labels se
+            JOIN revision_policy_state ps
+              ON ps.state_id = se.state_id AND ps.valid_to IS NULL
+            """
+        )
+    }
+
+    if "min_sources" in req and n_sources < req["min_sources"]:
+        failures.append(
+            f"本套件要求 ≥{req['min_sources']} 个来源，实际 {n_sources}"
+            "（策略卷需要一份未标注的第二来源来验证计数不泄露）"
+        )
+    if "max_sources" in req and n_sources > req["max_sources"]:
+        failures.append(
+            f"本套件要求 ≤{req['max_sources']} 个来源，实际 {n_sources}"
+            "（多来源会污染期望事件集合/selected 路径解析）"
+        )
+    if "min_events" in req and n_events < req["min_events"]:
+        failures.append(f"本套件要求 ≥{req['min_events']} 个事件，实际 {n_events}")
+    if "min_labeled_events" in req and labeled < req["min_labeled_events"]:
+        failures.append(
+            f"本套件要求 ≥{req['min_labeled_events']} 个已标注事件，实际 {labeled}"
+            "（请先对来源执行 label-source，否则权限用例的失败不可判读）"
+        )
+    if "min_unlabeled_events" in req and unlabeled < req["min_unlabeled_events"]:
+        failures.append(
+            f"本套件要求 ≥{req['min_unlabeled_events']} 个未标注事件，实际 {unlabeled}"
+            "（需要一份未标注来源验证未分类内容对 agent 不可见）"
+        )
+    for label in req.get("required_scope_labels", ()):
+        if label not in scope_labels:
+            failures.append(f"缺少必需的 scope 标签 '{label}'（请先标注）")
+    for label in req.get("required_sensitivity_labels", ()):
+        if label not in sensitivity_labels:
+            failures.append(f"缺少必需的 sensitivity 标签 '{label}'（请先标注）")
+    return failures
 
 
 def run_suite(
@@ -64,6 +146,27 @@ def run_suite(
     timezone: str = "UTC",
 ) -> EvalReport:
     limits = limits or SearchLimits()
+    violations = check_preconditions(conn, suite)
+    if violations:
+        # 前置不满足：不跑用例。红色失败必须只代表真实缺陷，不代表环境配错。
+        return EvalReport(
+            suite_name=suite.name,
+            passed=False,
+            summary={
+                "gates": {
+                    "recall_at10": None,
+                    "recall_at10_gate": None,
+                    "citation_resolution": None,
+                    "citation_gate": None,
+                    "refusal_all_passed": None,
+                    "answer_rate_normal": None,
+                    "forbidden_access_seen": None,
+                },
+                "cases_total": 0,
+                "cases_passed": 0,
+            },
+            precondition_failures=violations,
+        )
     filters = profile_filters(suite.profile)
     results = [
         _run_case(conn, suite.profile, case, filters, limits, timezone)
