@@ -140,7 +140,7 @@ def _hit_to_result(conn: sqlite3.Connection, hit: SearchHit) -> dict:
         "timestamp": hit.source_created_at,
         "time_known": hit.time_known,
         "snippet": hit.snippet,
-        "citation_id": f"pb:{hit.event_id}:{hit.revision_id}",
+        "citation_id": f"pb:{hit.revision_id}",
         "evidence_level": "message_record",
         "source_locator": _occurrence_ref(conn, hit.revision_id),
     }
@@ -442,7 +442,7 @@ def tool_get_event(
             "conversation_id": ev["conversation_id"],
             "note": "仅所选路径上的有界邻接，不返回完整对话树（§8）",
         },
-        "citation_id": f"pb:{event_id}:{revision_id}",
+        "citation_id": f"pb:{revision_id}",
         "evidence_level": "message_record",
         "source_locator": ref,
         "context_radius": radius,
@@ -518,7 +518,7 @@ def _authorized_context(
                 "speaker_type": nr["speaker_type"],
                 "timestamp": nr["source_created_at"],
                 "snippet": (nr["raw_text"] or "")[:200],
-                "citation_id": f"pb:{neighbor_event}:{nr['revision_id']}",
+                "citation_id": f"pb:{nr['revision_id']}",
             }
         )
     return out

@@ -22,3 +22,6 @@ build/
 
 # 系统
 .DS_Store
+
+# §9.1：用户真实标注评测集保存在 Git 外私有评测目录
+evals/private/

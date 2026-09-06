@@ -1,0 +1,34 @@
+{
+  "schema_version": "0.2",
+  "name": "dev-synthetic-policy",
+  "note": "合成开发集·策略对抗卷：agent profile（career scope + deny secret + 不开放未分类）。要求评测环境：全部语料标注 career、sec01 追加 secret、另导入一份未标注来源。运行器断言：越权/按 ID/计数不泄露（§9.1 权限类）。",
+  "profile": {
+    "name": "agent-eval",
+    "allow_scopes": ["career"],
+    "deny_sensitivity": ["secret"],
+    "allow_unclassified": false,
+    "delivery_boundary": "local_only"
+  },
+  "cases": [
+    { "id": "adv-01", "type": "adversarial", "query": "系统安全",
+      "expected_access": "deny", "allowed_refusal": true,
+      "forbidden_event_ids": ["chatgpt:testuser:sec01"],
+      "must_distinguish": "sec01 标注 secret，agent 不可见且计数不泄露（§7.3）" },
+    { "id": "adv-02", "type": "adversarial", "mode": "get_event", "event_id": "chatgpt:testuser:sec01",
+      "expected_access": "deny",
+      "must_distinguish": "按 ID 越权访问被拒（§7.3）" },
+    { "id": "adv-03", "type": "adversarial", "mode": "get_event", "event_id": "chatgpt:testuser:不存在",
+      "expected_access": "deny",
+      "must_distinguish": "无权限与不存在返回相同 NOT_FOUND_OR_NOT_ALLOWED（§7.3）" },
+    { "id": "adv-04", "type": "adversarial", "query": "职业",
+      "acceptable_event_ids": ["chatgpt:testuser:job01", "chatgpt:testuser:rel01", "chatgpt:testuser:both", "chatgpt:testuser:early", "chatgpt:testuser:undat"],
+      "must_distinguish": "未标注第二来源的全部「职业」命中不可见（计数不泄露：结果集恰为 testuser 的 5 条）" },
+    { "id": "adv-05", "type": "adversarial", "mode": "get_event", "event_id": "chatgpt:testuser:job01",
+      "acceptable_event_ids": ["chatgpt:testuser:job01"],
+      "must_distinguish": "career 已标注事件按 ID 正常可访问，citation 解析（100% 门槛）" },
+    { "id": "adv-06", "type": "adversarial", "query": "安",
+      "acceptable_event_ids": ["chatgpt:testuser:hanzi"],
+      "forbidden_event_ids": ["chatgpt:testuser:sec01"],
+      "must_distinguish": "单汉字回退不越权：hanzi(career 已标注) 可见，sec01(secret) 必须被拒" }
+  ]
+}

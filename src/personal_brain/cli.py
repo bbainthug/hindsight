@@ -11,6 +11,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -380,6 +381,121 @@ def cmd_restore_check(args, cfg: BrainConfig, as_json: bool) -> int:
     return 0
 
 
+def cmd_eval(args, cfg: BrainConfig, as_json: bool) -> int:
+    """§16 brain eval --suite <path>：运行评测套件（合成开发集或私有真实集）。"""
+    import json as _json
+
+    from personal_brain.evals.runner import run_suite
+    from personal_brain.evals.suite import load_suite
+    from personal_brain.retrieval.search import SearchLimits
+
+    suite = load_suite(Path(args.suite))
+    conn = connect(cfg.db_path)
+    try:
+        sl = SearchLimits(
+            default_limit=cfg.search.default_limit,
+            max_limit=cfg.search.max_limit,
+            snippet_chars=cfg.search.snippet_chars,
+            max_text_chars=cfg.search.max_text_chars,
+            max_scan=cfg.search.max_scan,
+        )
+        report = run_suite(conn, suite, limits=sl, timezone=cfg.timezone)
+    finally:
+        conn.close()
+    out = _json.dumps(report, ensure_ascii=False, indent=2, default=str)
+    if as_json:
+        print(out)
+    else:
+        gates = report.summary["gates"]
+        print(f"评测套件 {report.suite_name}: {'通过' if report.passed else '未通过'}")
+        print(f"  用例 {report.summary['cases_passed']}/{report.summary['cases_total']} 通过")
+        print(
+            f"  Recall@10 = {gates['recall_at10'] if gates['recall_at10'] is not None else 'n/a'}"
+            f"（门槛 ≥0.90：{'✓' if gates['recall_at10_gate'] else '✗'}）"
+        )
+        print(
+            f"  citation 解析 = {gates['citation_resolution'] if gates['citation_resolution'] is not None else 'n/a'}"
+            f"（门槛 100%：{'✓' if gates['citation_gate'] else '✗'}）"
+        )
+        print(
+            f"  拒答样例全过：{'✓' if gates['refusal_all_passed'] else '✗'} | "
+            f"正常问题回答率 = {gates['answer_rate_normal']}"
+        )
+        print(f"  禁止访问出现：{'是 ✗' if gates['forbidden_access_seen'] else '否 ✓'}")
+        for r in report.cases:
+            if not r.passed:
+                print(f"  ✗ {r.case_id}: {r.failure_types or r.error}")
+        if report.human_review:
+            print(f"  人工复核项：{len(report.human_review)} 条（见 --json 输出）")
+    return 0 if report.passed else 1
+
+
+def cmd_bench(args, cfg: BrainConfig, as_json: bool) -> int:
+    """§9.2 门槛 7：合成数据规模基准（预热 P95，硬件/SQLite 版本入档）。"""
+    import tempfile
+
+    from personal_brain.evals.benchmark import run_benchmark
+    from personal_brain.evals.synthgen import build_benchmark_archive
+    from personal_brain.policy.labels import label_source
+    from personal_brain.policy.profiles import AccessProfile
+
+    n_conv, n_msg = args.conversations, args.messages
+    conn = connect(cfg.db_path)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            total = n_conv * n_msg
+            print(f"生成 {total} 条合成消息（{n_conv}×{n_msg}）…", file=sys.stderr)
+            zp = build_benchmark_archive(tmp / "bench.zip", n_conv, n_msg, seed=args.seed)
+            importer = ChatGPTImporter(conn, cfg.archive_dir)
+            started = time.perf_counter()
+            importer.import_archive(zp, args.source)
+            import_ms = (time.perf_counter() - started) * 1000
+            print(f"导入完成：{import_ms:.0f} ms", file=sys.stderr)
+            if args.label:
+                source_id = conn.execute(
+                    "SELECT source_id FROM sources WHERE account_namespace = ?",
+                    (args.source,),
+                ).fetchone()["source_id"]
+                label_source(conn, source_id, scope_labels=("bench",))
+            sample = conn.execute(
+                "SELECT event_id FROM events LIMIT 1"
+            ).fetchone()["event_id"]
+            profile = AccessProfile(
+                name="bench",
+                allow_scopes=("bench",) if args.label else ("*",),
+                deny_sensitivity=(),
+                allow_unclassified=not args.label,
+                tools=("search_history", "get_recent_events", "get_event"),
+                delivery_boundary="local_only",
+            )
+            report = run_benchmark(
+                conn,
+                profile,
+                sample,
+                db_path=cfg.db_path,
+                repeats=args.repeats,
+            )
+    finally:
+        conn.close()
+    if args.out:
+        Path(args.out).write_text(report.to_json(), encoding="utf-8")
+        print(f"报告已写入 {args.out}", file=sys.stderr)
+    if as_json:
+        print(report.to_json())
+    else:
+        print(f"环境: {report.environment['platform']} | SQLite {report.environment['sqlite']} | Python {report.environment['python']}")
+        print(f"规模: {json.dumps(report.rows, ensure_ascii=False)}")
+        print(f"门槛: {report.gate} → {'通过 ✓' if report.passed else '未通过 ✗'}")
+        for r in report.results:
+            mark = " [单独披露]" if r.disclosed_separately else ""
+            print(
+                f"  {r.name:32s} P50 {r.p50_ms:8.1f}ms  P95 {r.p95_ms:8.1f}ms  "
+                f"P99 {r.p99_ms:8.1f}ms  命中 {r.result_count}{mark}"
+            )
+    return 0 if report.passed else 1
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -459,6 +575,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("restore-check", help="校验备份可用性")
     p.add_argument("backup_path")
     p.set_defaults(func=cmd_restore_check)
+
+    p = sub.add_parser("eval", help="运行评测套件（§9：Recall@10/引用解析/权限断言）")
+    p.add_argument("--suite", required=True, help="评测套件 JSON 路径")
+    p.set_defaults(func=cmd_eval)
+
+    p = sub.add_parser("bench", help="合成数据性能基准（§9.2：预热 P95，短词单独披露）")
+    p.add_argument("--conversations", type=int, default=500)
+    p.add_argument("--messages", type=int, default=200)
+    p.add_argument("--seed", type=int, default=20250801)
+    p.add_argument("--repeats", type=int, default=20)
+    p.add_argument("--source", default="benchuser")
+    p.add_argument("--label", action="store_true", help="导入后标注 bench scope")
+    p.add_argument("--out", help="报告 JSON 输出路径")
+    p.set_defaults(func=cmd_bench)
 
     return parser
 

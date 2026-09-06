@@ -332,6 +332,27 @@ def _apply_text_budget(page: list[SearchHit], limits: SearchLimits) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _fetch_fts_rows(
+    conn: sqlite3.Connection,
+    base_sql: str,
+    params: list,
+    plans: list[TermPlan],
+) -> list[sqlite3.Row]:
+    """FTS 路径 SQL 侧预过滤：候选词以 MATCH 子查询嵌入基础 SQL。
+
+    策略/时间过滤仍在 SQL 层且只对候选行求值（§9.2 规模门槛）——
+    避免每次查询全表载入，也避免分块 IN 的多次往返。返回候选行供 Python
+    侧验证（FTS 二元切分是超集，验证语义不可省）。
+    """
+    for plan in plans:
+        base_sql += (
+            " AND r.revision_id IN (SELECT revision_id FROM event_revisions_fts"
+            " WHERE event_revisions_fts MATCH ?)"
+        )
+        params.append(build_fts_query(plan.fts_tokens))
+    return conn.execute(base_sql, params).fetchall()
+
+
 def search_history(
     conn: sqlite3.Connection,
     query: str,
@@ -374,28 +395,37 @@ def search_history(
 
     params: list = []
     base_sql = _filter_sql(filters, params)
-    rows = conn.execute(base_sql, params).fetchall()
-    by_rid = {r["revision_id"]: r for r in rows}
 
     # 候选缩小：可安全预筛选的词用 FTS（超集），其余词回退全过滤池。
     # 任一回退词存在且过滤池超出 max_scan → QUERY_TOO_BROAD（§6.3）。
     needs_fallback = any(p.needs_fallback for p in plans)
-    if needs_fallback and len(rows) > limits.max_scan:
-        raise QueryTooBroad(
-            f"回退扫描范围 {len(rows)} 条超出资源上限 {limits.max_scan}；"
-            "请缩小时间范围或指定来源（QUERY_TOO_BROAD）"
-        )
+    if needs_fallback:
+        rows = conn.execute(base_sql, params).fetchall()
+        if len(rows) > limits.max_scan:
+            raise QueryTooBroad(
+                f"回退扫描范围 {len(rows)} 条超出资源上限 {limits.max_scan}；"
+                "请缩小时间范围或指定来源（QUERY_TOO_BROAD）"
+            )
+    else:
+        # FTS 路径：MATCH 子查询嵌入基础 SQL（§9.2 规模门槛：不载全表），
+        # 候选行即策略过滤后的 FTS 候选；Python 侧仍须验证（超集）。
+        rows = _fetch_fts_rows(conn, base_sql, params, plans)
+    by_rid = {r["revision_id"]: r for r in rows}
+
     candidates: set[str] | None = None
-    for plan in plans:
-        if plan.needs_fallback:
-            term_set = set(by_rid)
-        else:
-            fts_ids = fts_match(conn, build_fts_query(plan.fts_tokens))
-            term_set = set(by_rid) & fts_ids
-        candidates = term_set if candidates is None else (candidates & term_set)
-        if not candidates:
-            candidates = set()
-            break
+    if needs_fallback:
+        for plan in plans:
+            if plan.needs_fallback:
+                term_set = set(by_rid)
+            else:
+                fts_ids = fts_match(conn, build_fts_query(plan.fts_tokens))
+                term_set = set(by_rid) & fts_ids
+            candidates = term_set if candidates is None else (candidates & term_set)
+            if not candidates:
+                candidates = set()
+                break
+    else:
+        candidates = set(by_rid)
 
     selected_events: set[str] | None = None
     path_unknown: list[str] = []

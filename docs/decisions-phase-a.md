@@ -40,6 +40,7 @@
 | 29 | **MCP 计数不泄露**：total_matched/undated_excluded/brain_status 覆盖期与来源列表只在授权过滤后的集合上统计；不支持结构等解析警告只报存在性不报数量/位置 | §7.3「邻接、标题、计数也必须经过权限检查」「不泄露隐藏记录数量」 | — |
 | 30 | **get_event 授权与上下文**：按事件逐次重新授权（无权限与不存在同为 NOT_FOUND_OR_NOT_ALLOWED）；context_radius 沿所选路径取邻接并逐条授权，未授权邻接静默略去（不计数量）；speaker_id 仅在事件已授权时返回；检索结果只给 snippet 不给正文（正文走 get_event）；定位符只含 snapshot_id/node_id | §7.3/§8.1 | — |
 | 31 | **MCP SDK 与传输**：官方 python-sdk v2（低层 Server + on_list_tools/on_call_tool），stdio 传输；服务端无网络监听、无远程调用 | §7.1 首版本机 stdio；§7.5 无服务端 LLM | — |
+| 32 | **FTS 行 rowid 化（规模门槛修复）**：FTS5 `DELETE FROM ... WHERE revision_id=?` 按非 rowid 列删除会全扫索引 → 导入 O(n²)（10 万条 15 分钟+）；迁移 4 改为 `rowid = sha256(revision_id) 前 8 字节 & 2^63-1` 作主键，`INSERT OR REPLACE` 按 rowid（O(log n)）；实测 10 万条导入 19.7s | §9.2 门槛 7 实测触发；L3 可从 L1 重建的性质保证迁移可逆（§3.2） | rowid 冲突概率 ~2^-63 可忽略；`fts_rowid` 注册于连接工厂，迁移与运行期同一实现 |
 
 ## 已知限制（本切片内不做、不假装已做）
 
@@ -93,3 +94,17 @@
 - 客户端配置说明与安全须知：`docs/phase-b-mcp.md`。
 - 测试：profile 校验 7 项、服务层契约 18 项（含计数不泄露、越权按 ID、邻接过滤、epoch 重跑/放弃、撤回 resolver）、stdio 子进程集成 5 项（initialize → tools/list → tools/call 全链路 + 工具面限制）。
 - 已知限制：无服务端缓存（epoch 机制已就位）；`remote_model_allowed` 仅作为声明记录，Phase B 无远程 Provider 可配置。
+
+## Phase C 交付记录（真实样本评测与性能门槛）
+
+- `evals/suite.py`：§9.1 全字段套件模式（query/profile/时间分支条件/可接受证据 revision 集/必须区分语义/禁止结论/允许拒答/预期访问结果/归属断言）——**不是 expected_contains 关键词检查**；结构非法拒绝执行。
+- `evals/runner.py`：Recall@10、多证据覆盖、citation 100% 解析、禁止访问断言、拒答全过 + 正常回答率（防全拒答作弊）、失败分类（recall_fail/citation_unresolved/forbidden_access/attribution_mismatch/unexpected_empty）、人工复核输出段（归属表 + 区分语义）。
+- `evals/citation.py`：`pb:{revision_id}` 解析到正确版本（revision_id 自含 event_id）；不可解析/不可访问统一 None（防探测）。
+- `evals/synthgen.py`：种子确定合成生成器，消息 ID 全源唯一（事件 ID 含 message_id）；生成物必须通过真实导入器（契约测试）。
+- `evals/benchmark.py`：产品服务层路径预热 P95（含 epoch 核对）；硬件/SQLite/Python/行数入档；短词扫描单独披露；QUERY_TOO_BROAD 诚实拒绝被记录而非整体崩溃。
+- `history/schema.py` 迁移 4 + `retrieval/fts.py`：FTS 行 rowid 化（决策 32）——导入从 O(n²)（10 万条 15 分钟+）修复到 O(n log n)（19.7s）。
+- CLI：`brain eval --suite <path>`（§16 落地）、`brain bench`（规模/重复/标注/报告）。
+- 合成开发集：`evals/suites/dev-synthetic.json`（语义卷，本地审核 profile）25 题 + `dev-synthetic-policy.json`（策略卷，agent profile）6 题；期望全部机械推导，随 Git 分发（§9.1 公开仓库只放合成 fixture）。
+- 真实标注问题集：用户制品，保存于 Git 外 `evals/private/`（已 .gitignore），开发/保留集分开，同 schema 直接 `brain eval`。
+- 测试：237 passed（新增 19：套件校验 6 + 引用解析 3 + 双开发套件 4 + 生成器 3 + 基准冒烟 2）。
+- 已知边界：评测为检索级（证据列表），token 成本与答案正确性属 §9.3 Memory 对照（Memory 未实现）；人工复核（§9.2 门槛 4）不可自动化，报告只输出材料。

@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from personal_brain.history.schema import apply_migrations
+
+
+def fts_rowid(revision_id: str) -> int:
+    """FTS 行 rowid：sha256 前 8 字节 → 有符号 64 位正整数（确定性、可重复重建）。"""
+    return int.from_bytes(hashlib.sha256(revision_id.encode("utf-8")).digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -20,6 +26,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     """
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.create_function("fts_rowid", 1, fts_rowid)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")

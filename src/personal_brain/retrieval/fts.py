@@ -10,19 +10,22 @@ from __future__ import annotations
 
 import sqlite3
 
+from personal_brain.history.db import fts_rowid
 from personal_brain.history.normalization import normalize_search_text
 from personal_brain.retrieval.bigram import to_index_text
 
 
 def index_revision(conn: sqlite3.Connection, revision_id: str, raw_text: str | None) -> None:
-    """在发布事务内为内容版本建立索引行（幂等：先删后插）。"""
-    conn.execute(
-        "DELETE FROM event_revisions_fts WHERE revision_id = ?", (revision_id,)
-    )
+    """在发布事务内为内容版本建立索引行。
+
+    幂等：rowid = fts_rowid(revision_id) 为主键，INSERT OR REPLACE 按 rowid
+    替换（O(log n)）；不做按 revision_id 列的 DELETE（会全扫索引 → O(n²)）。
+    """
     bigram_text = to_index_text(normalize_search_text(raw_text)) if raw_text else ""
     conn.execute(
-        "INSERT INTO event_revisions_fts (revision_id, bigram_text) VALUES (?, ?)",
-        (revision_id, bigram_text),
+        "INSERT OR REPLACE INTO event_revisions_fts (rowid, bigram_text, revision_id)"
+        " VALUES (?, ?, ?)",
+        (fts_rowid(revision_id), bigram_text, revision_id),
     )
 
 
@@ -41,8 +44,9 @@ def rebuild_fts(conn: sqlite3.Connection) -> int:
                 else ""
             )
             conn.execute(
-                "INSERT INTO event_revisions_fts (revision_id, bigram_text) VALUES (?, ?)",
-                (row["revision_id"], bigram_text),
+                "INSERT OR REPLACE INTO event_revisions_fts (rowid, bigram_text, revision_id)"
+                " VALUES (?, ?, ?)",
+                (fts_rowid(row["revision_id"]), bigram_text, row["revision_id"]),
             )
     except BaseException:
         conn.rollback()

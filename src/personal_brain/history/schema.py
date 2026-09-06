@@ -240,6 +240,25 @@ MIGRATIONS: list[tuple[int, str]] = [
         INSERT INTO policy_epoch (id, epoch, updated_at) VALUES (1, 0, '');
         """,
     ),
+    (
+        4,
+        """
+        -- FTS 行以 rowid = fts_rowid(revision_id) 为主键（§9.2 规模门槛）。
+        -- 旧表按 revision_id 列 DELETE 会全扫索引 → O(n²)；rowid 化后
+        -- INSERT OR REPLACE / DELETE 均按 rowid（索引内 O(log n)）。
+        -- 从 L1 event_revisions 全量重建（§3.2 派生索引可从 L1 重建）。
+        CREATE VIRTUAL TABLE event_revisions_fts_v2 USING fts5(
+            bigram_text,
+            revision_id UNINDEXED,
+            tokenize='unicode61'
+        );
+        INSERT INTO event_revisions_fts_v2 (rowid, bigram_text, revision_id)
+            SELECT fts_rowid(revision_id), bigram_text, revision_id
+            FROM event_revisions_fts;
+        DROP TABLE event_revisions_fts;
+        ALTER TABLE event_revisions_fts_v2 RENAME TO event_revisions_fts;
+        """,
+    ),
 ]
 
 
