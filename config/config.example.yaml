@@ -1,0 +1,17 @@
+# Personal Brain 配置示例（§16：示例不含真实账号、密钥、聊天路径或正文）
+# 复制为 config/config.yaml 并改为本机私有数据根目录下的实际路径。
+# 私有数据根目录不应位于 Git、默认云同步或 Agent 工作目录中。
+
+database_path: /path/to/private-data-root/db/brain.sqlite
+archive_dir: /path/to/private-data-root/raw
+backup_dir: /path/to/private-data-root/backups
+
+# 自然日期解析所用时区（§4.4：CLI 接收自然日期时按配置时区转为明确边界）
+timezone: UTC
+
+search:
+  default_limit: 10
+  max_limit: 50
+  snippet_chars: 400
+  max_text_chars: 8000
+  max_scan: 50000

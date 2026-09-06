@@ -294,7 +294,7 @@ class ChatGPTImporter:
             for conv in conversations
             for node in conv.nodes
             for t in (node.created,)
-            if t is not None and t.is_known
+            if t is not None and t.is_known and t.utc_iso is not None
         ]
         if not known:
             return None, None
@@ -362,4 +362,8 @@ def staged_time(value: object) -> ParsedTime | None:
     """测试与调试辅助：暴露 unix 时间解析。"""
     from personal_brain.history.timeutil import parse_unix_seconds
 
-    return parse_unix_seconds(value) if value is not None else None
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float, str)):
+        return parse_unix_seconds(value)
+    return None

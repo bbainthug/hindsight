@@ -86,7 +86,7 @@ class TestSearchTextGeneration:
             (eid,),
         ).fetchone()
         assert rev["search_text"] == "我最近正在考虑职业方向变化"
-        assert rev["search_text_norm_version"] == "nfkc-casefold-v1"
+        assert rev["search_text_norm_version"] == "nfkc-casefold-v2-charmap"
 
 
 class TestSourceAssetsManifest:

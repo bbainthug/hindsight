@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from personal_brain.history.identity import (
+    SEARCH_TEXT_NORM_VERSION,
     compute_event_id,
     compute_fallback_source_message_id,
     compute_revision_hash,
@@ -26,6 +27,7 @@ from personal_brain.importers.models import (
     JobError,
     MemberManifest,
 )
+from personal_brain.retrieval.fts import index_revision
 
 POLICY_VERSION_INITIAL = "v0"
 
@@ -606,7 +608,7 @@ def _insert_revision(
             node.content_type,
             node.raw_text,
             normalize_search_text(node.raw_text) if node.raw_text is not None else None,
-            "nfkc-casefold-v1",
+            SEARCH_TEXT_NORM_VERSION,
             created.utc_iso if created else None,
             updated.utc_iso if updated else None,
             created.original_time_value if created else None,
@@ -633,3 +635,5 @@ def _insert_revision(
         """,
         (revision_id, POLICY_VERSION_INITIAL, recorded_at),
     )
+    # 派生 FTS 索引与内容同事务写入（§5.2 可见性边界）
+    index_revision(conn, revision_id, node.raw_text)

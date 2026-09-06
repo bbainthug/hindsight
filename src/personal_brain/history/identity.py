@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import unicodedata
 
+from personal_brain.history.normalization import NORM_VERSION, normalize_search_text
 from personal_brain.history.timeutil import ParsedTime
 
 __all__ = [
@@ -28,7 +28,9 @@ __all__ = [
     "SEARCH_TEXT_NORM_VERSION",
 ]
 
-SEARCH_TEXT_NORM_VERSION = "nfkc-casefold-v1"
+# 归一化实现与版本常量在 history/normalization.py
+# （v2：逐字符 NFKC+casefold + 原文偏移映射）
+SEARCH_TEXT_NORM_VERSION = NORM_VERSION
 
 _HASH_NS_EVENT = "personal-brain:event:v1"
 _HASH_NS_FALLBACK = "personal-brain:fallback-msg:v1"
@@ -119,11 +121,6 @@ def compute_revision_hash(
 def revision_id_for(event_id: str, revision_hash: str) -> str:
     """确定性 revision_id：``{event_id}:r{hash 前 20 位}``，天然幂等。"""
     return f"{event_id}:r{revision_hash[:20]}"
-
-
-def normalize_search_text(text: str) -> str:
-    """NFKC + casefold 归一化（§6.2 初始索引策略，本轮仅生成不建索引）。"""
-    return unicodedata.normalize("NFKC", text).casefold()
 
 
 def content_digest(text: str | None) -> str:

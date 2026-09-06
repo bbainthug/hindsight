@@ -212,6 +212,21 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        2,
+        """
+        -- 派生检索索引（L3，可从 L1 完整重建，§3.2/§6.2）。
+        -- 应用侧 tokenizer：连续汉字重叠二元切分后以空格分隔存储于
+        -- bigram_text；拉丁/数字保持完整 token；unicode61 负责切分。
+        CREATE VIRTUAL TABLE event_revisions_fts USING fts5(
+            bigram_text,
+            revision_id UNINDEXED,
+            tokenize='unicode61'
+        );
+        CREATE INDEX ix_revisions_created ON event_revisions(source_created_at);
+        CREATE INDEX ix_policy_state_current ON revision_policy_state(revision_id, valid_to);
+        """,
+    ),
 ]
 
 

@@ -190,7 +190,9 @@ def _parse_node(
 
     author = message.get("author") or {}
     role = author.get("role") if isinstance(author, dict) else None
-    speaker_type = _ROLE_MAP.get(role, "unknown")
+    speaker_type = (
+        _ROLE_MAP.get(role, "unknown") if isinstance(role, str) else "unknown"
+    )
     speaker_id = author.get("name") if isinstance(author, dict) else None
     if not speaker_id and isinstance(role, str):
         speaker_id = role
@@ -285,9 +287,11 @@ def _extract_content(
 
 def _parse_time(value: object) -> ParsedTime | None:
     """ChatGPT 导出时间为 unix 秒浮点；缺失/为 None 表示时间未知。"""
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
-    return parse_unix_seconds(value)
+    if isinstance(value, (int, float, str)):
+        return parse_unix_seconds(value)
+    return None
 
 
 def _locator(member_path: str, conv_id: str, node_id: str) -> str:
