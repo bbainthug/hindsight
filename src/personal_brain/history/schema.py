@@ -227,6 +227,19 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX ix_policy_state_current ON revision_policy_state(revision_id, valid_to);
         """,
     ),
+    (
+        3,
+        """
+        -- 策略纪元（§7.3）：任何标签/撤回状态变更在同一事务内递增。
+        -- 缓存键与请求返回前核对都必须包含该纪元；标签更新立即失效。
+        CREATE TABLE policy_epoch (
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            epoch      INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO policy_epoch (id, epoch, updated_at) VALUES (1, 0, '');
+        """,
+    ),
 ]
 
 

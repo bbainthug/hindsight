@@ -512,17 +512,47 @@ def recent_events(
     limit: int | None = None,
     limits: SearchLimits | None = None,
     now: datetime | None = None,
+    cursor: str | None = None,
+    filters: SearchFilters | None = None,
 ) -> SearchResult:
     limits = limits or SearchLimits()
+    filters = filters or SearchFilters()
     eff_limit = min(limit if limit is not None else limits.default_limit, limits.max_limit)
     ref = now or datetime.now(UTC)
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=UTC)
     window_start = (ref - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.%f")
-    filters = SearchFilters(date_from=window_start + "Z")
+    # 窗口过滤 + 调用方策略/窄化过滤合并（策略过滤永远保留）
+    eff_filters = SearchFilters(
+        date_from=window_start + "Z",
+        source_id=filters.source_id,
+        account_namespace=filters.account_namespace,
+        conversation_id=filters.conversation_id,
+        speaker_type=filters.speaker_type,
+        allow_scopes=filters.allow_scopes,
+        deny_sensitivity=filters.deny_sensitivity,
+        allow_unclassified=filters.allow_unclassified,
+    )
     params: list = []
-    sql = _filter_sql(filters, params)
+    sql = _filter_sql(eff_filters, params)
+    # keyset 游标：(source_created_at, revision_id) 降序；等宽 ISO 字典序=时间序。
+    # 空间键 9 的补数不可用于跨字母字符串，直接用降序条件而非倒序索引键。
+    if cursor:
+        try:
+            data = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+            c_ts, c_rid = str(data["t"]), str(data["r"])
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"无效游标: {exc}") from exc
+        sql += (
+            " AND (r.source_created_at < ?"
+            " OR (r.source_created_at = ? AND r.revision_id < ?))"
+        )
+        params.extend([c_ts, c_ts, c_rid])
+    sql += " ORDER BY r.source_created_at DESC, r.revision_id DESC LIMIT ?"
+    params.append(eff_limit + 1)
     rows = conn.execute(sql, params).fetchall()
+    truncated = len(rows) > eff_limit
+    rows = rows[:eff_limit]
     hits = [
         SearchHit(
             event_id=r["event_id"],
@@ -536,14 +566,13 @@ def recent_events(
             time_known=r["source_created_at"] is not None,
             score=0,
             raw_text=r["raw_text"],
+            snippet=(r["raw_text"] or "")[: limits.snippet_chars] or None,
             source_locator=r["source_locator"],
         )
         for r in rows
     ]
-    hits.sort(key=lambda h: (h.source_created_at or "", h.revision_id), reverse=True)
-    total = len(hits)
-    page = hits[:eff_limit]
-    for hit in page:
+    total = len(hits)  # keyset 分页：total_matched = 本页大小，truncated+cursor 表示更多
+    for hit in hits:
         hit.occurrences = [
             {
                 "account_namespace": o["account_namespace"],
@@ -562,14 +591,22 @@ def recent_events(
                 (hit.revision_id,),
             ).fetchall()
         ]
+    page = hits
     _apply_text_budget(page, limits)
     return SearchResult(
         hits=page,
         total_matched=total,
-        truncated=total > eff_limit,
-        next_cursor=None,
+        truncated=truncated,
+        next_cursor=(
+            _encode_recent_cursor(page[-1]) if truncated and page else None
+        ),
         undated_excluded=0,
         path_unknown_conversations=[],
-        interpreted={"date_from": filters.date_from, "date_to": None},
+        interpreted={"date_from": eff_filters.date_from, "date_to": None},
         query_plans=[],
     )
+
+
+def _encode_recent_cursor(hit: SearchHit) -> str:
+    payload = {"t": hit.source_created_at or "", "r": hit.revision_id}
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()

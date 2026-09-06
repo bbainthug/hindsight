@@ -14,6 +14,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from personal_brain.history.policy_epoch import bump_policy_epoch
 from personal_brain.history.timeutil import utc_now_iso
 
 
@@ -62,6 +63,7 @@ def withdraw_source(
 ) -> WithdrawSummary:
     """撤回整个来源：全部事件的所有可用版本 + 来源状态（单事务）。"""
     now = now or utc_now_iso()
+    already = False
     conn.execute("BEGIN IMMEDIATE")
     try:
         src = conn.execute(
@@ -70,28 +72,33 @@ def withdraw_source(
         if src is None:
             raise ValueError(f"来源不存在: {source_id}")
         if src["status"] == "withdrawn":
-            return WithdrawSummary(
-                target="source", target_id=source_id, applied_at=now
+            already = True  # 幂等：重复撤回无状态变更，不递增纪元
+        else:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT r.revision_id, r.event_id FROM event_revisions r
+                JOIN events e ON e.event_id = r.event_id
+                WHERE e.source_id = ?
+                """,
+                (source_id,),
+            ).fetchall()
+            count = _withdraw_revisions(
+                conn, [r["revision_id"] for r in rows], now
             )
-        rows = conn.execute(
-            """
-            SELECT DISTINCT r.revision_id, r.event_id FROM event_revisions r
-            JOIN events e ON e.event_id = r.event_id
-            WHERE e.source_id = ?
-            """,
-            (source_id,),
-        ).fetchall()
-        count = _withdraw_revisions(
-            conn, [r["revision_id"] for r in rows], now
-        )
-        conn.execute(
-            "UPDATE sources SET status = 'withdrawn' WHERE source_id = ?",
-            (source_id,),
-        )
+            conn.execute(
+                "UPDATE sources SET status = 'withdrawn' WHERE source_id = ?",
+                (source_id,),
+            )
     except BaseException:
         conn.rollback()
         raise
+    if not already:
+        bump_policy_epoch(conn)  # §7.3：策略变更同事务递增纪元
     conn.commit()
+    if already:
+        return WithdrawSummary(
+            target="source", target_id=source_id, applied_at=now
+        )
     return WithdrawSummary(
         target="source",
         target_id=source_id,
@@ -123,6 +130,7 @@ def withdraw_event(
     except BaseException:
         conn.rollback()
         raise
+    bump_policy_epoch(conn)  # §7.3：策略变更同事务递增纪元
     conn.commit()
     return WithdrawSummary(
         target="event",

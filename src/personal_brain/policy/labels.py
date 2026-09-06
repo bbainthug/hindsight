@@ -13,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 
+from personal_brain.history.policy_epoch import bump_policy_epoch
 from personal_brain.history.timeutil import utc_now_iso
 
 _VALID_CLASSIFICATION = {"unclassified", "rule_classified", "human_reviewed"}
@@ -144,6 +145,7 @@ def label_source(
     except BaseException:
         conn.rollback()
         raise
+    bump_policy_epoch(conn)  # §7.3：策略变更同事务递增纪元
     conn.commit()
     return LabelSummary(
         target="source",
@@ -220,6 +222,7 @@ def label_event(
     except BaseException:
         conn.rollback()
         raise
+    bump_policy_epoch(conn)  # §7.3：策略变更同事务递增纪元
     conn.commit()
     return LabelSummary(
         target="event",

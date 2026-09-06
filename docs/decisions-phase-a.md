@@ -35,6 +35,11 @@
 | 24 | CLI 标签命令显式覆盖标签（不做继承合并），scope 标签输出强制附混合话题警示（§16）；`label-source` 覆盖来源下全部事件全部**当前可用**版本，`label-event` 提供混合话题的细粒度出口；撤回状态下的来源/事件**拒绝标注**，来源内个别撤回版本跳过并报告 `skipped_withdrawn` | §7.2 显式人工标注优先；§16 要求警示；§14.1 撤回不可被标注操作隐式解除（验收缺陷 A） | — |
 | 25 | mypy 已配置并全绿（§3.1「类型检查」落地），严格度 pragmatic（check_untyped_defs, no_implicit_optional） | 消除"类型检查器未配置"已知限制 | — |
 | 26 | **撤回状态延续**：新内容版本入库时，policy_state 初始 availability 继承事件/来源的 withdrawn 状态（`_event_or_source_withdrawn`）；检索基线 SQL 另加 `sources.status != 'withdrawn'` 防御层 | §14.2.3「显式忘记此内容应覆盖重复来源，不能靠另一份导出保活」（验收缺陷 B）；新版本照常入库保留证据链，但不可检索；防御层堵住 policy 行状态漂移时的旁路 | 恢复可见性须显式流程（本批不提供），继承规则集中一处可改 |
+| 27 | **策略纪元**（迁移 3）：`policy_epoch` 单行计数器，标签/撤回变更在同一事务内递增；MCP 工具返回前核对，执行中变化 → 整体重跑（≤3 次），持续变化抛 `TRANSIENT_POLICY_CHANGE` 放弃结果 | §7.3「请求在返回前核对 policy epoch」；无缓存的 Phase B 下语义为"结果新鲜度保证"，缓存引入后键必须含 epoch | — |
+| 28 | **profile 绑定与校验**：受信任启动配置绑定单一 profile；`local_cli_only` profile 拒绝作为 MCP 身份；`delivery_boundary` 缺失拒绝启动；`allow_unclassified` 缺省 False；工具白名单之外的工具在 tools/list 隐藏且调用返回 NOT_FOUND_OR_NOT_ALLOWED | §7.3/§7.4/§7.5；配置错误宁可拒绝启动也不猜测语义 | — |
+| 29 | **MCP 计数不泄露**：total_matched/undated_excluded/brain_status 覆盖期与来源列表只在授权过滤后的集合上统计；不支持结构等解析警告只报存在性不报数量/位置 | §7.3「邻接、标题、计数也必须经过权限检查」「不泄露隐藏记录数量」 | — |
+| 30 | **get_event 授权与上下文**：按事件逐次重新授权（无权限与不存在同为 NOT_FOUND_OR_NOT_ALLOWED）；context_radius 沿所选路径取邻接并逐条授权，未授权邻接静默略去（不计数量）；speaker_id 仅在事件已授权时返回；检索结果只给 snippet 不给正文（正文走 get_event）；定位符只含 snapshot_id/node_id | §7.3/§8.1 | — |
+| 31 | **MCP SDK 与传输**：官方 python-sdk v2（低层 Server + on_list_tools/on_call_tool），stdio 传输；服务端无网络监听、无远程调用 | §7.1 首版本机 stdio；§7.5 无服务端 LLM | — |
 
 ## 已知限制（本切片内不做、不假装已做）
 
@@ -77,3 +82,14 @@
 - `cli.py`：`brain` 入口（pyproject scripts），全命令 --json；测试配置样例 `config/config.example.yaml`（不含真实路径）。
 - 差分验证：15 条查询语义电池 × FTS/基线两路径结果集一致（`test_retrieval.py::TestFtsBaselineDifferential`）。
 - 已知修正：批次 1 的 `search_text_norm_version` 断言 v1→v2（归一化升级的正确反映，非放宽）。
+
+## Phase B 交付记录（权限与只读 MCP）
+
+- `history/schema.py` 迁移 3：`policy_epoch` 单行计数器（决策 27）；标签/撤回事务内递增；顺带修复 `withdraw_source` 幂等早退导致事务悬挂的隐患。
+- `policy/profiles.py`：受信任启动配置解析与校验（决策 28）——`local_cli_only` 拒绝作为 MCP 身份、`delivery_boundary` 必填、未知工具拒绝、`allow_unclassified` 缺省 False。
+- `mcp_server/service.py`：4 个只读工具统一服务层——profile 强制过滤（请求只可收窄）、计数不泄露（决策 29）、NOT_FOUND_OR_NOT_ALLOWED 不可区分、context_radius 逐条授权（决策 30）、epoch 返回前核对 + 重跑。
+- `mcp_server/server.py`：官方 python-sdk v2 低层 Server，stdio 传输，工具白名单生效于 tools/list 与 tools/call（决策 31）；`personal-brain-mcp` 入口。
+- `retrieval/search.py`：`recent_events` 升级 keyset 游标 + 接受调用方过滤（收掉批次 2 非阻塞项；MCP `get_recent_events` 契约要求）。
+- 客户端配置说明与安全须知：`docs/phase-b-mcp.md`。
+- 测试：profile 校验 7 项、服务层契约 18 项（含计数不泄露、越权按 ID、邻接过滤、epoch 重跑/放弃、撤回 resolver）、stdio 子进程集成 5 项（initialize → tools/list → tools/call 全链路 + 工具面限制）。
+- 已知限制：无服务端缓存（epoch 机制已就位）；`remote_model_allowed` 仅作为声明记录，Phase B 无远程 Provider 可配置。

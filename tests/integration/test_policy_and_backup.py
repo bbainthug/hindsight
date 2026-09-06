@@ -177,7 +177,7 @@ class TestBackupRestore:
         check = restore_check(result.backup_dir)
         assert check.integrity == "ok"
         assert check.foreign_key_violations == 0
-        assert check.schema_version == 2
+        assert check.schema_version == 3
         assert check.manifest_ok is True
         assert check.counts["events"] > 0
 

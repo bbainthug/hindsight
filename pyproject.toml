@@ -4,6 +4,7 @@ version = "0.2.0a0"
 description = "Personal Brain：可追溯的个人历史检索与受控记忆系统（Phase A 数据层）"
 requires-python = ">=3.12"
 dependencies = [
+    "mcp>=2.1.1",
     "pydantic>=2.7",
     "pyyaml>=6.0.3",
 ]
@@ -24,6 +25,7 @@ packages = ["src/personal_brain"]
 
 [project.scripts]
 brain = "personal_brain.cli:main"
+personal-brain-mcp = "personal_brain.mcp_server.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
