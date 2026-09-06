@@ -12,8 +12,12 @@ from personal_brain.history.schema import apply_migrations
 
 
 def fts_rowid(revision_id: str) -> int:
-    """FTS 行 rowid：sha256 前 8 字节 → 有符号 64 位正整数（确定性、可重复重建）。"""
-    return int.from_bytes(hashlib.sha256(revision_id.encode("utf-8")).digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
+    """FTS 行 rowid：sha256 前 8 字节 → 有符号 64 位正整数（确定性、可重复重建）。
+
+    sha256 前 8 字节截断在 10 万行量级碰撞概率 ~3×10⁻¹⁰，可忽略（决策 32）。
+    """
+    digest = hashlib.sha256(revision_id.encode("utf-8")).digest()[:8]
+    return int.from_bytes(digest, "big") & 0x7FFFFFFFFFFFFFFF
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:

@@ -99,7 +99,7 @@ def run_suite(
             "attribution": result.attribution_rows,
             "forbidden_conclusions": list(case.forbidden_conclusions),
         }
-        for case, result in zip(suite.cases, results)
+        for case, result in zip(suite.cases, results, strict=True)
         if case.must_distinguish or case.attribution
     ]
     return EvalReport(

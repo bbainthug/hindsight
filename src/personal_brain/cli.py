@@ -402,7 +402,7 @@ def cmd_eval(args, cfg: BrainConfig, as_json: bool) -> int:
         report = run_suite(conn, suite, limits=sl, timezone=cfg.timezone)
     finally:
         conn.close()
-    out = _json.dumps(report, ensure_ascii=False, indent=2, default=str)
+    out = _json.dumps(asdict(report), ensure_ascii=False, indent=2)
     if as_json:
         print(out)
     else:
@@ -414,7 +414,8 @@ def cmd_eval(args, cfg: BrainConfig, as_json: bool) -> int:
             f"（门槛 ≥0.90：{'✓' if gates['recall_at10_gate'] else '✗'}）"
         )
         print(
-            f"  citation 解析 = {gates['citation_resolution'] if gates['citation_resolution'] is not None else 'n/a'}"
+            f"  citation 解析 = "
+            f"{gates['citation_resolution'] if gates['citation_resolution'] is not None else 'n/a'}"
             f"（门槛 100%：{'✓' if gates['citation_gate'] else '✗'}）"
         )
         print(
@@ -484,7 +485,10 @@ def cmd_bench(args, cfg: BrainConfig, as_json: bool) -> int:
     if as_json:
         print(report.to_json())
     else:
-        print(f"环境: {report.environment['platform']} | SQLite {report.environment['sqlite']} | Python {report.environment['python']}")
+        print(
+            f"环境: {report.environment['platform']} | "
+            f"SQLite {report.environment['sqlite']} | Python {report.environment['python']}"
+        )
         print(f"规模: {json.dumps(report.rows, ensure_ascii=False)}")
         print(f"门槛: {report.gate} → {'通过 ✓' if report.passed else '未通过 ✗'}")
         for r in report.results:
