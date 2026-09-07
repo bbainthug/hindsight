@@ -43,6 +43,8 @@
 | 32 | **FTS 行 rowid 化（规模门槛修复）**：FTS5 `DELETE FROM ... WHERE revision_id=?` 按非 rowid 列删除会全扫索引 → 导入 O(n²)（10 万条 15 分钟+）；迁移 4 改为 `rowid = sha256(revision_id) 前 8 字节 & 2^63-1` 作主键，`INSERT OR REPLACE` 按 rowid（O(log n)）；实测 10 万条导入 19.7s | §9.2 门槛 7 实测触发；L3 可从 L1 重建的性质保证迁移可逆（§3.2） | rowid 冲突概率 ~3×10⁻¹⁰ 可忽略；`fts_rowid` 注册于连接工厂，迁移与运行期同一实现 |
 | 33 | **套件前置条件声明**：suite `requires`（来源数/事件数/已标注与未标注下界/必需标签），runner 跑用例前检查，不满足 fail-fast 并逐条说明 | 验收报告建议 2：裸库跑策略卷/双来源跑语义卷的失败形态与真实越权漏洞一模一样，红色失败脱敏比浪费时间更危险 | 检查只读元数据计数；requires 键白名单，未知键拒绝加载 |
 | 34 | **基准语料物化覆盖**：生成器含连续 "AI工程选型" 与会话首条 "你好，世界"，recent 窗口锚定库内最大消息时间——每条常用查询命中 ≥10，snippet/偏移映射/citation/文本预算路径全覆盖；另将 search 池查询改为**正文懒加载**（池 SELECT 不含 raw_text，页确定后按 revision_id 补取；recent 路径仅 limit+1 行故保留正文列） | 验收报告建议 4：命中 0 的查询只测扫描路径，门槛数字偏乐观；正文懒加载降低每次查询 I/O 与对象物化成本，加大 1s 门槛余量 | 差分测试保护匹配集不变；页内正文补取由 snippet 测试覆盖 |
+| 35 | **非 JSON 成员只留 manifest**：官方导出含 GB 级媒体 .dat/chat.html，导入器原样读入内存且记 MEMBER_NOT_JSON 伪错误；改为非 JSON 成员仅登记 source_assets（.dat→attachment），不读入、不算解析错误 | 真实导出核对（§5「核对实际导出样本结构」）；1.17GB 导出内存峰值从全量降到仅 JSON ~50MB | 媒体内容不入库仅留溯源行；后续媒体处理可扩展 kind |
+| 36 | **发布与 mapping 键序解耦**：conversation_node_edges 的 FK 要求父节点行已存在，真实导出 mapping 子先于父 → FK 炸；改两遍写入（先全部节点行，后写边） | 真实 1540 对话导入触发；合成 fixture root-first 掩盖了顺序假设 | 发布语义不变：图=节点+边，顺序无关 |
 
 ## 已知限制（本切片内不做、不假装已做）
 

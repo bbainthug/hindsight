@@ -297,6 +297,9 @@ def _publish_conversation(
     )
 
     parent_of: dict[str, str] = {}
+    # 两遍写入（决策 36）：真实导出的 mapping 键序不保证父先于子，而
+    # conversation_node_edges 的外键要求父节点行已存在；合成 fixture 恰好
+    # root 在前掩盖了该问题。第一遍落全部节点行，第二遍写边——与遍历顺序解耦。
     for node in conv.nodes:
         nk = _node_key(conv.conversation_id, node.node_id)
         event_id: str | None = None
@@ -336,6 +339,7 @@ def _publish_conversation(
             (conn_snapshot_id, nk),
         )
 
+    for node in conv.nodes:
         if node.parent_node_id is not None and node.parent_node_id in node_ids:
             parent_of[node.node_id] = node.parent_node_id
             conn.execute(
@@ -346,7 +350,7 @@ def _publish_conversation(
                 """,
                 (
                     _node_key(conv.conversation_id, node.parent_node_id),
-                    nk,
+                    _node_key(conv.conversation_id, node.node_id),
                     node.child_order,
                 ),
             )

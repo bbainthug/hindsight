@@ -198,6 +198,22 @@ class ChatGPTImporter:
         manifest: list[MemberManifest] = []
         raw_members: list[tuple[str, bytes]] = []
         for member in reader.members():
+            is_json = member.member_path.lower().endswith(".json")
+            kind = "other"
+            if not is_json:
+                # 非 JSON 成员（官方导出的媒体 .dat / chat.html 等）：只留
+                # manifest 溯源，不读入内存——真实导出媒体可达 GB 级（决策 35）。
+                if member.member_path.lower().endswith(".dat"):
+                    kind = "attachment"
+                manifest.append(
+                    MemberManifest(
+                        member_path=member.member_path,
+                        sha256=member.sha256,
+                        size_bytes=member.size_bytes,
+                        kind=kind,
+                    )
+                )
+                continue
             manifest.append(
                 MemberManifest(
                     member_path=member.member_path,

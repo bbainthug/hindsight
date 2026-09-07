@@ -303,3 +303,51 @@ def _dated(text: str, update_time: float) -> dict:
     m = text_message("u-0001", "user", text, None, update_time=update_time)
     mapping = dict([node("root", None, None, ["u-0001"]), node("u-0001", m, "root", [])])
     return build_conversation("conv-undated", "无时间", None, mapping, "u-0001")
+
+
+class TestMappingOrderIndependence:
+    """决策 36：真实导出 mapping 键序不保证父先于子，发布不得依赖遍历顺序。"""
+
+    def test_child_before_parent_still_publishes(self, importer, tmp_path: Path):
+        m1 = text_message("m1", "user", "真实导出顺序：子节点先出现", T0)
+        a1 = text_message("a1", "assistant", "父节点在 mapping 中靠后", T0 + 60)
+        # 故意按 子→父→根 的顺序构造 mapping（与合成 fixture 的 root-first 相反）
+        mapping = dict(
+            [
+                node("a1", a1, "m1", []),
+                node("m1", m1, "root", ["a1"]),
+                node("root", None, None, ["m1"]),
+            ]
+        )
+        conv = build_conversation("conv-reorder", "乱序 mapping", T0, mapping, "a1")
+        zp = _write_zip([conv], tmp_path / "reordered.zip")
+        result = importer.import_archive(zp, "reorder-user")
+
+        assert result.job_kind == "published"
+        assert result.events_new == 2
+        rows = importer.conn.execute(
+            "SELECT COUNT(*) c FROM conversation_node_edges"
+        ).fetchone()
+        assert rows["c"] == 2  # root→m1、m1→a1 全部落库（FK 未因顺序炸）
+        # 所选路径从 current_node 回溯：root→m1→a1
+        path = importer.conn.execute(
+            """
+            SELECT p.depth AS depth, n.node_id AS node_id
+            FROM conversation_selected_path p
+            JOIN conversation_nodes n ON n.node_key = p.node_key
+            WHERE n.conversation_id = 'conv-reorder'
+            ORDER BY p.depth
+            """
+        ).fetchall()
+        assert [(r["depth"], r["node_id"]) for r in path] == [
+            (0, "root"), (1, "m1"), (2, "a1"),
+        ]
+        # 检索可见（selected 模式包含所选路径事件）
+        from personal_brain.retrieval.search import SearchFilters, search_history
+
+        hits = search_history(
+            importer.conn,
+            "真实导出顺序",
+            filters=SearchFilters(path_mode="selected"),
+        ).hits
+        assert {h.event_id.rsplit(":", 1)[-1] for h in hits} >= {"m1"}
