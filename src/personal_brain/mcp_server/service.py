@@ -18,6 +18,7 @@ import sqlite3
 
 from personal_brain.history.policy_epoch import current_policy_epoch
 from personal_brain.policy.profiles import AccessProfile
+from personal_brain.retrieval.credentials import redact_known_credentials
 from personal_brain.retrieval.search import (
     QueryTooBroad,
     SearchFilters,
@@ -34,6 +35,9 @@ MAX_CONTEXT_RADIUS = 3
 EPOCH_RETRIES = 3
 CAPABILITY_NOTE = (
     "语义扩展未实现：同义表达（如“求职/找工作”）需分别检索（§6.3 已知能力边界）"
+)
+CREDENTIAL_REDACTION_NOTE = (
+    "远程交付前已遮蔽可识别的凭据形态；这是启发式拦截，不是完整 DLP。"
 )
 
 
@@ -62,6 +66,12 @@ def profile_filters(profile: AccessProfile) -> SearchFilters:
         deny_sensitivity=profile.deny_sensitivity or None,
         allow_unclassified=profile.allow_unclassified,
     )
+
+
+def _remote_delivery(profile: AccessProfile) -> bool:
+    """Whether response content crosses the configured remote-model boundary."""
+
+    return profile.delivery_boundary == "remote_model_allowed"
 
 
 def _authorized_revision_ids(
@@ -319,17 +329,21 @@ def tool_search_history(
             limit=args.get("limit"),
             cursor=args.get("cursor"),
             limits=limits,
+            redact_credentials=_remote_delivery(profile),
         )
     except QueryTooBroad as exc:
         raise ToolError("QUERY_TOO_BROAD", str(exc)) from exc
     except ValueError as exc:
         raise ToolError("INVALID_PARAMS", str(exc)) from exc
+    warnings = [CAPABILITY_NOTE]
+    if result.credentials_redacted:
+        warnings.append(CREDENTIAL_REDACTION_NOTE)
     return _envelope(
         [_hit_to_result(conn, h) for h in result.hits],
         truncated=result.truncated,
         next_cursor=result.next_cursor,
         coverage=_coverage(conn, profile_filters(profile), branch_scope),
-        warnings=[CAPABILITY_NOTE],
+        warnings=warnings,
     )
 
 
@@ -365,13 +379,15 @@ def tool_get_recent_events(
         now=now,
         cursor=args.get("cursor"),
         filters=filters,
+        redact_credentials=_remote_delivery(profile),
     )
+    warnings = [CREDENTIAL_REDACTION_NOTE] if result.credentials_redacted else []
     return _envelope(
         [_hit_to_result(conn, h) for h in result.hits],
         truncated=result.truncated,
         next_cursor=result.next_cursor,
         coverage=_coverage(conn, profile_filters(profile), branch_scope="all"),
-        warnings=[],
+        warnings=warnings,
     ) | {"reference_time": now.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"}
 
 
@@ -388,6 +404,7 @@ def tool_get_event(
             "INVALID_PARAMS", f"context_radius 必须是 0..{MAX_CONTEXT_RADIUS} 的整数"
         )
     filters = profile_filters(profile)
+    redact_credentials = _remote_delivery(profile)
     auth_revs = _authorized_revision_ids(conn, filters, event_id)
     if not auth_revs:
         # 无权限与不存在返回相同错误（§7.3）
@@ -413,10 +430,38 @@ def tool_get_event(
     ref = _occurrence_ref(conn, revision_id)
 
     context: list[dict] = []
+    context_redacted = False
     if radius:
-        context = _authorized_context(
-            conn, filters, event_id, ev["conversation_id"], revision_id, radius
+        context, context_redacted = _authorized_context(
+            conn,
+            filters,
+            event_id,
+            ev["conversation_id"],
+            revision_id,
+            radius,
+            redact_credentials=redact_credentials,
         )
+
+    offset = args.get("text_offset", 0)
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ToolError("INVALID_PARAMS", "text_offset 必须为非负整数")
+    # Context and body share the configured text budget, including long imported messages.
+    budget = limits.max_text_chars
+    bounded_context = []
+    for item in context:
+        if budget <= 1:
+            break
+        snippet = item["snippet"][:min(200, budget // 4)]
+        bounded_context.append({**item, "snippet": snippet})
+        budget -= len(snippet)
+    raw_text = rev["raw_text"] or ""
+    safe_raw_text = (
+        redact_known_credentials(raw_text) if redact_credentials else raw_text
+    )
+    assert safe_raw_text is not None
+    credentials_redacted = context_redacted or safe_raw_text != raw_text
+    page_text = safe_raw_text[offset:offset + budget]
+    next_offset = offset + len(page_text) if offset + len(page_text) < len(raw_text) else None
 
     versions = [
         {
@@ -435,7 +480,10 @@ def tool_get_event(
         "account_namespace": ev["account_namespace"],
         "timestamp": rev["source_created_at"],
         "content_type": rev["content_type"],
-        "raw_text": rev["raw_text"],
+        "raw_text": page_text,
+        "text_offset": offset,
+        "next_text_offset": next_offset,
+        "raw_text_total_chars": len(raw_text),
         "revision_resolution": ev["revision_resolution"],
         "versions": versions,
         "branch_context": {
@@ -446,14 +494,14 @@ def tool_get_event(
         "evidence_level": "message_record",
         "source_locator": ref,
         "context_radius": radius,
-        "context": context,
+        "context": bounded_context,
     }
     return _envelope(
         [result],
-        truncated=False,
+        truncated=next_offset is not None or len(bounded_context) < len(context),
         next_cursor=None,
         coverage=_coverage(conn, filters, branch_scope="all"),
-        warnings=[],
+        warnings=[CREDENTIAL_REDACTION_NOTE] if credentials_redacted else [],
     )
 
 
@@ -464,14 +512,16 @@ def _authorized_context(
     conversation_id: str,
     revision_id: str,
     radius: int,
-) -> list[dict]:
+    *,
+    redact_credentials: bool = False,
+) -> tuple[list[dict], bool]:
     """所选路径上有界邻接；每个邻接事件**单独授权**，未授权静默略去。"""
     node = conn.execute(
         "SELECT node_key FROM conversation_nodes WHERE conversation_id = ? AND event_id = ?",
         (conversation_id, event_id),
     ).fetchone()
     if node is None:
-        return []
+        return [], False
     path = conn.execute(
         """
         SELECT sp.node_key, sp.depth, cn.event_id
@@ -489,8 +539,9 @@ def _authorized_context(
     try:
         pos = keys.index(node["node_key"])
     except ValueError:
-        return []
+        return [], False
     out: list[dict] = []
+    credentials_redacted = False
     for i in range(max(0, pos - radius), min(len(path), pos + radius + 1)):
         if i == pos:
             continue
@@ -510,6 +561,12 @@ def _authorized_context(
             conn, filters, neighbor_event
         ):
             continue
+        raw_text = nr["raw_text"] or ""
+        safe_text = (
+            redact_known_credentials(raw_text) if redact_credentials else raw_text
+        )
+        assert safe_text is not None
+        credentials_redacted |= safe_text != raw_text
         out.append(
             {
                 "event_id": neighbor_event,
@@ -517,11 +574,11 @@ def _authorized_context(
                 "offset": i - pos,  # 负=之前，正=之后
                 "speaker_type": nr["speaker_type"],
                 "timestamp": nr["source_created_at"],
-                "snippet": (nr["raw_text"] or "")[:200],
+                "snippet": safe_text[:200],
                 "citation_id": f"pb:{nr['revision_id']}",
             }
         )
-    return out
+    return out, credentials_redacted
 
 
 # ---------------------------------------------------------------------------

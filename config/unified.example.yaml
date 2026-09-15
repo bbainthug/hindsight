@@ -1,0 +1,29 @@
+# Copy to an ignored local path and select exact directories before use.
+database_path: /absolute/path/brain.sqlite
+timezone: Asia/Shanghai
+vault:
+  root: /absolute/path/Obsidian-Vault
+  max_files: 10000
+  max_file_bytes: 1000000
+profile: local
+profiles:
+  local:
+    allow_scopes: [career, projects, learning, technical_preferences]
+    deny_sensitivity: [secret, third_party_sensitive]
+    allow_unclassified: false
+    delivery_boundary: local_only
+    tools: [brain_status, search_brain, search_history, get_event, get_recent_events, search_vault, get_vault_note]
+    vault_include: ["wiki/*.md", "projects/*.md"]
+    vault_exclude: ["wiki/private/*"]
+  chatgpt:
+    allow_scopes: [career, projects, learning, technical_preferences]
+    deny_sensitivity: [secret, third_party_sensitive]
+    allow_unclassified: false
+    delivery_boundary: remote_model_allowed
+    tools: [brain_status, search_brain, search_history, get_event, get_recent_events, search_vault, get_vault_note]
+    vault_include: ["projects/*.md"]
+    vault_exclude: []
+search:
+  default_limit: 8
+  max_limit: 30
+  max_text_chars: 6000

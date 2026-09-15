@@ -39,6 +39,16 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(db_path: str | Path) -> sqlite3.Connection:
+    """MCP reads existing archives without creating a database or running migrations."""
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.create_function("fts_rowid", 1, fts_rowid)
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     """显式事务上下文：发布可见性边界（§5.2 步骤 6）依赖原子提交。"""

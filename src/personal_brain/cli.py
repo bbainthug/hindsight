@@ -509,6 +509,66 @@ def cmd_bench(args, cfg: BrainConfig, as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 
 
+def cmd_recall(args, cfg: BrainConfig, as_json: bool) -> int:
+    """Use the same trusted profile and payload as the MCP entry point."""
+    import json
+
+    from personal_brain.history.db import connect_readonly
+    from personal_brain.mcp_server.service import run_with_epoch_retry
+    from personal_brain.mcp_server.unified import search_brain
+    from personal_brain.policy.profiles import load_mcp_config
+    from personal_brain.retrieval.search import SearchLimits
+
+    if not args.config:
+        raise ValueError("recall 需要 --config 指定 MCP profile 配置")
+    config = load_mcp_config(Path(args.config))
+    if "search_brain" not in config.profile.tools:
+        raise ValueError("profile 未授权 search_brain")
+    conn = connect_readonly(config.db_path)
+    try:
+        result = run_with_epoch_retry(
+            search_brain, conn, config,
+            {"query": args.query, "source": args.source, "limit": args.limit,
+             **({"speaker_type": args.speaker} if args.speaker else {})},
+            SearchLimits(**config.search_limits),
+        )
+    finally:
+        conn.close()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if "error" in result else 0
+
+
+def cmd_doctor(args, cfg: BrainConfig, as_json: bool) -> int:
+    import json
+    import shutil
+
+    from personal_brain.history.db import connect_readonly
+    from personal_brain.policy.profiles import load_mcp_config
+
+    if not args.config:
+        raise ValueError("doctor 需要 --config 指定 MCP profile 配置")
+    config = load_mcp_config(Path(args.config))
+    conn = connect_readonly(config.db_path)
+    try:
+        conn.execute("SELECT revision_id FROM event_revisions LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    result = {
+        "database_readable": True,
+        "profile": config.profile.name,
+        "delivery_boundary": config.profile.delivery_boundary,
+        "tools": list(config.profile.tools),
+        "vault_configured": config.vault is not None,
+        "vault_root_exists": config.vault.root.is_dir() if config.vault else None,
+        "tunnel_client_installed": shutil.which("tunnel-client") is not None,
+        "chatgpt_connection_verified": False,
+        "automatic_chat_capture": False,
+        "note": "本地配置检查不代表网页版已连接；尚未验证隧道和账号权限。",
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["vault_root_exists"] is not False else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="brain", description="Personal Brain CLI")
     parser.add_argument("--config", help="YAML 配置文件路径")
@@ -518,6 +578,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timezone", help="覆盖自然日期解析时区")
     parser.add_argument("--json", action="store_true", help="结构化 JSON 输出")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("doctor", help="只读检查统一入口配置与本地接入前提")
+    p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("recall", help="使用 MCP profile 统一检索聊天与 Vault")
+    p.add_argument("query")
+    p.add_argument("--source", choices=["all", "history", "vault"], default="all")
+    p.add_argument("--speaker", choices=["owner", "assistant"])
+    p.add_argument("--limit", type=int, default=10)
+    p.set_defaults(func=cmd_recall)
 
     p = sub.add_parser("import-chatgpt", help="导入 ChatGPT 导出（ZIP 或目录）")
     p.add_argument("path")

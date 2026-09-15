@@ -17,7 +17,12 @@ from pathlib import Path
 
 import yaml
 
-ALLOWED_TOOLS = ("brain_status", "search_history", "get_recent_events", "get_event")
+from personal_brain.retrieval.vault import VaultConfig
+
+ALLOWED_TOOLS = (
+    "brain_status", "search_history", "get_recent_events", "get_event",
+    "search_brain", "search_vault", "get_vault_note",
+)
 DELIVERY_BOUNDARIES = ("local_only", "remote_model_allowed")
 TRANSPORTS = ("stdio_mcp", "local_cli_only")
 
@@ -43,6 +48,7 @@ class McpServerConfig:
     timezone: str
     profile: AccessProfile
     search_limits: dict[str, int]  # §6.3 可配置项（受 SearchLimits 硬上限钳制）
+    vault: VaultConfig | None = None
 
 
 def _parse_profile(name: str, raw: dict) -> AccessProfile:
@@ -59,7 +65,7 @@ def _parse_profile(name: str, raw: dict) -> AccessProfile:
     unknown = [t for t in tools if t not in ALLOWED_TOOLS]
     if unknown:
         raise ProfileConfigError(
-            f"profile {name}: 未知或未实现的工具 {unknown}（Phase B 仅 4 个只读工具）"
+            f"profile {name}: 未知或未实现的工具 {unknown}"
         )
     boundary = raw.get("delivery_boundary")
     if boundary not in DELIVERY_BOUNDARIES:
@@ -100,9 +106,31 @@ def load_mcp_config(path: Path) -> McpServerConfig:
             f"profile {profile_name} 是本地人工审核用途"
             "（transport=local_cli_only），不作为 MCP 服务身份（§7.4）"
         )
+    vault = None
+    vault_raw = raw.get("vault")
+    if vault_raw is not None:
+        if not isinstance(vault_raw, dict) or not vault_raw.get("root"):
+            raise ProfileConfigError("vault 需要 root")
+        # 授权路径属于绑定 profile，不允许调用者修改。
+        profile_raw = profiles_raw[profile_name]
+        includes = profile_raw.get("vault_include", [])
+        excludes = profile_raw.get("vault_exclude", [])
+        for value in (includes, excludes):
+            if not isinstance(value, list) or any(not isinstance(x, str) for x in value):
+                raise ProfileConfigError("vault_include/vault_exclude 必须为字符串列表")
+        if includes:
+            vault = VaultConfig(
+                root=Path(str(vault_raw["root"])).expanduser(),
+                include=tuple(includes), exclude=tuple(excludes),
+                max_file_bytes=int(vault_raw.get("max_file_bytes", 1_000_000)),
+                max_files=int(vault_raw.get("max_files", 10_000)),
+            )
+    if any(t in profile.tools for t in ("search_vault", "get_vault_note")) and vault is None:
+        raise ProfileConfigError("Vault 工具需要 vault.root 与 profile.vault_include")
     return McpServerConfig(
         db_path=Path(raw["database_path"]).expanduser(),
         timezone=str(raw.get("timezone", "UTC")),
         profile=profile,
         search_limits=dict(raw.get("search", {})),
+        vault=vault,
     )

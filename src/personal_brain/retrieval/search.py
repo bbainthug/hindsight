@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from personal_brain.history.normalization import normalize_with_map, raw_span
 from personal_brain.retrieval.bigram import TermPlan, build_fts_query, plan_term
+from personal_brain.retrieval.credentials import redact_known_credentials
 from personal_brain.retrieval.fts import fts_match
 
 
@@ -97,6 +98,7 @@ class SearchResult:
     notes: tuple[str, ...] = (
         "语义扩展未实现：同义表达（如“求职/找工作”）需分别检索（§6.3 已知能力边界）",
     )
+    credentials_redacted: bool = False
 
 
 _BASE_FROM_WHERE = """
@@ -255,19 +257,34 @@ def _verify(
     return True, first_span, score
 
 
-def _snippet(raw_text: str, search_text: str, span: tuple[int, int], width: int) -> str:
-    """匹配区间 → 原文片段（偏移映射，§6.2 不用归一化索引切原文）。"""
+def _snippet_window(
+    raw_text: str, search_text: str, span: tuple[int, int], width: int
+) -> tuple[int, int, str, str]:
+    """Return the source-text window and ellipsis markers for a match."""
     norm, offsets = normalize_with_map(raw_text)
     if norm != search_text:
         # 理论不可达：索引与映射同实现；防御性回退为原文开头
-        return raw_text[:width]
+        right = min(len(raw_text), width)
+        return 0, right, "", ""
     raw_start, raw_end = raw_span(norm, offsets, span[0], span[1])
     ctx = max(0, (width - (raw_end - raw_start)) // 2)
     left = max(0, raw_start - ctx)
     right = min(len(raw_text), raw_end + ctx)
     prefix = "…" if left > 0 else ""
     suffix = "…" if right < len(raw_text) else ""
+    return left, right, prefix, suffix
+
+
+def _render_snippet(
+    raw_text: str, window: tuple[int, int, str, str]
+) -> str:
+    left, right, prefix, suffix = window
     return f"{prefix}{raw_text[left:right]}{suffix}"
+
+
+def _snippet(raw_text: str, search_text: str, span: tuple[int, int], width: int) -> str:
+    """匹配区间 → 原文片段（偏移映射，§6.2 不用归一化索引切原文）。"""
+    return _render_snippet(raw_text, _snippet_window(raw_text, search_text, span, width))
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +391,7 @@ def search_history(
     cursor: str | None = None,
     limits: SearchLimits | None = None,
     use_fts: bool = True,
+    redact_credentials: bool = False,
 ) -> SearchResult:
     """历史检索主入口。
 
@@ -488,13 +506,32 @@ def search_history(
         for hit in page:
             hit.raw_text = texts.get(hit.revision_id)
 
+    credentials_redacted = False
+
     # 页内富化：snippet（原文偏移映射，锚定命中处）+ 出现位置（来源追溯）
     for hit in page:
         row = by_rid[hit.revision_id]
-        if hit.raw_text and row["search_text"] and hit.match_span is not None:
-            hit.snippet = _snippet(
-                hit.raw_text, row["search_text"], hit.match_span, limits.snippet_chars
+        original_text = hit.raw_text
+        if original_text:
+            safe_text = (
+                redact_known_credentials(original_text)
+                if redact_credentials
+                else original_text
             )
+            assert safe_text is not None
+            credentials_redacted |= safe_text != original_text
+            hit.raw_text = safe_text
+            if row["search_text"] and hit.match_span is not None:
+                # Calculate offsets against the original text, then render the
+                # same-length redacted text. This prevents a secret near a
+                # snippet boundary from leaking a partial token.
+                window = _snippet_window(
+                    original_text,
+                    row["search_text"],
+                    hit.match_span,
+                    limits.snippet_chars,
+                )
+                hit.snippet = _render_snippet(safe_text, window)
         hit.occurrences = [
             {
                 "account_namespace": o["account_namespace"],
@@ -531,6 +568,7 @@ def search_history(
             }
             for p in plans
         ],
+        credentials_redacted=credentials_redacted,
     )
 
 
@@ -568,6 +606,7 @@ def recent_events(
     now: datetime | None = None,
     cursor: str | None = None,
     filters: SearchFilters | None = None,
+    redact_credentials: bool = False,
 ) -> SearchResult:
     limits = limits or SearchLimits()
     filters = filters or SearchFilters()
@@ -607,24 +646,34 @@ def recent_events(
     rows = conn.execute(sql, params).fetchall()
     truncated = len(rows) > eff_limit
     rows = rows[:eff_limit]
-    hits = [
-        SearchHit(
-            event_id=r["event_id"],
-            revision_id=r["revision_id"],
-            is_current=r["current_revision_id"] == r["revision_id"],
-            conversation_id=r["conversation_id"],
-            speaker_id=r["speaker_id"],
-            speaker_type=r["speaker_type"],
-            content_type=r["content_type"],
-            source_created_at=r["source_created_at"],
-            time_known=r["source_created_at"] is not None,
-            score=0,
-            raw_text=r["raw_text"],
-            snippet=(r["raw_text"] or "")[: limits.snippet_chars] or None,
-            source_locator=r["source_locator"],
+    credentials_redacted = False
+    hits: list[SearchHit] = []
+    for r in rows:
+        original_text = r["raw_text"] or ""
+        safe_text = (
+            redact_known_credentials(original_text)
+            if redact_credentials
+            else original_text
         )
-        for r in rows
-    ]
+        assert safe_text is not None
+        credentials_redacted |= safe_text != original_text
+        hits.append(
+            SearchHit(
+                event_id=r["event_id"],
+                revision_id=r["revision_id"],
+                is_current=r["current_revision_id"] == r["revision_id"],
+                conversation_id=r["conversation_id"],
+                speaker_id=r["speaker_id"],
+                speaker_type=r["speaker_type"],
+                content_type=r["content_type"],
+                source_created_at=r["source_created_at"],
+                time_known=r["source_created_at"] is not None,
+                score=0,
+                raw_text=safe_text,
+                snippet=safe_text[: limits.snippet_chars] or None,
+                source_locator=r["source_locator"],
+            )
+        )
     total = len(hits)  # keyset 分页：total_matched = 本页大小，truncated+cursor 表示更多
     for hit in hits:
         hit.occurrences = [
@@ -658,6 +707,7 @@ def recent_events(
         path_unknown_conversations=[],
         interpreted={"date_from": eff_filters.date_from, "date_to": None},
         query_plans=[],
+        credentials_redacted=credentials_redacted,
     )
 
 
