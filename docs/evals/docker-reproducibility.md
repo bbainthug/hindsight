@@ -122,11 +122,12 @@ colima start --cpu 8 --memory 8 --vm-type vz   # 首次需联网拉取 VM 镜像
 docker compose build                            # 产出 personal-brain:repro
 docker compose run --rm test                    # 280 passed
 docker compose run --rm bench                   # bench 门槛 通过，写 docs/evals/benchmark-docker.json
-docker compose run --rm soak                    # ladder+soak（约 1.5-2h），写 docs/evals/soak-docker.json
+docker compose run --rm soak                    # ladder+soak 全量（约 1.5-2h），写 docs/evals/soak-docker.json
 ```
 
 容器报告落盘到 `docs/evals/`（`benchmark-docker.json` / `soak-docker.json`），命名规则
-见 `docs/evals/soak-20260915.md`。
+见 `docs/evals/soak-20260915.md`。本次交付中 soak 为**缩短口径冒烟**
+（`soak-20260915-docker-smoke.json`，levels 1,4 × 500 次/档 + 5 分钟 soak），全量命令同上。
 
 ## 7. 已知注意事项
 
