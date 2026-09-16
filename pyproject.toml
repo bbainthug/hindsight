@@ -1,7 +1,7 @@
 [project]
-name = "personal-brain"
+name = "hindsight"
 version = "0.2.0a0"
-description = "Personal Brain：可追溯的个人历史检索与受控记忆系统（Phase A 数据层）"
+description = "Hindsight：可追溯的对话知识检索与受控记忆系统（只读 MCP · 评测门 · 并发基准 · 容器复现）"
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=2.1.1",
