@@ -447,6 +447,8 @@ def cmd_bench(args, cfg: BrainConfig, as_json: bool) -> int:
     from personal_brain.policy.profiles import AccessProfile
 
     n_conv, n_msg = args.conversations, args.messages
+    cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.archive_dir.mkdir(parents=True, exist_ok=True)
     conn = connect(cfg.db_path)
     try:
         with tempfile.TemporaryDirectory() as td:
@@ -504,6 +506,73 @@ def cmd_bench(args, cfg: BrainConfig, as_json: bool) -> int:
                 f"P99 {r.p99_ms:8.1f}ms  命中 {r.result_count}{mark}"
             )
     return 0 if report.passed else 1
+
+
+def cmd_soak(args, cfg: BrainConfig, as_json: bool) -> int:
+    """并发 + 长稳基准（任务 B）：多进程只读、漂移/内存/完整性门槛。"""
+    from personal_brain.evals.soak import SoakOptions, report_to_json, run_soak
+
+    opts = SoakOptions(
+        mode=args.mode,
+        conversations=args.conversations,
+        messages=args.messages,
+        seed=args.seed,
+        source=args.source,
+        levels=[int(x) for x in str(args.levels).split(",") if x.strip()],
+        warmup_seconds=args.warmup_seconds,
+        queries_per_level=args.queries_per_level,
+        concurrency=args.concurrency,
+        duration_seconds=args.duration,
+        total_queries=args.total_queries,
+        rss_interval_s=args.rss_interval,
+        rss_baseline_after_s=args.rss_baseline_after,
+        writer=args.writer,
+    )
+    report = run_soak(cfg.db_path, cfg.archive_dir, opts)
+    if args.out:
+        Path(args.out).write_text(report_to_json(report), encoding="utf-8")
+        print(f"报告已写入 {args.out}", file=sys.stderr)
+    if as_json:
+        print(report_to_json(report))
+    else:
+        env = report["environment"]
+        print(
+            f"环境: {env['platform']} | SQLite {env['sqlite']} | Python {env['python']} | "
+            f"CPU {env['cpu_count']}"
+        )
+        print(f"规模: {report['config']['corpus_events']} events | 模式 {opts.mode}")
+        if report["ladder"]:
+            print("ladder（预热后）:")
+            for lv in report["ladder"]["levels"]:
+                print(
+                    f"  并发 {lv['concurrency']}: 查询 {lv['queries']}  QPS {lv['qps']}  "
+                    f"P50 {lv['p50_ms']:.1f}ms  P95 {lv['p95_ms']:.1f}ms  "
+                    f"P99 {lv['p99_ms']:.1f}ms  错误 {lv['errors']}"
+                    f"（预期拒绝 {lv['expected_rejections']}）"
+                )
+        if report["soak"]:
+            s = report["soak"]
+            print(
+                f"soak: 并发 {s['concurrency']} × {s['wall_s']:.0f}s / {s['queries']} 次查询  "
+                f"QPS {s['qps']}  P95 {s['p95_ms']:.1f}ms  错误 {s['errors']}"
+            )
+        if report["drift"]:
+            d = report["drift"]
+            print(
+                f"漂移: 后10% P95 {d['p95_last10_ms']:.1f}ms / 前10% P95 "
+                f"{d['p95_first10_ms']:.1f}ms = {d['ratio']}"
+            )
+        integrity = report["integrity"]
+        print(
+            f"完整性: integrity_check={integrity['integrity_check']} "
+            f"行数前后一致={integrity['all_counts_equal']}"
+        )
+        print(f"门槛: {sum(1 for g in report['gates'].values() if g['passed'] is False)} 项未过"
+              f" → {'通过 ✓' if report['passed'] else '未通过 ✗'}")
+        for name, g in report["gates"].items():
+            mark = "✓" if g["passed"] is True else ("—" if g["passed"] is None else "✗")
+            print(f"  {mark} {name}: value={g['value']} expect={g['expect']}")
+    return 0 if report["passed"] else 1
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +738,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label", action="store_true", help="导入后标注 bench scope")
     p.add_argument("--out", help="报告 JSON 输出路径")
     p.set_defaults(func=cmd_bench)
+
+    p = sub.add_parser(
+        "soak", help="并发与长稳基准（多进程只读，漂移/RSS/完整性门槛，任务 B）"
+    )
+    p.add_argument("--conversations", type=int, default=500)
+    p.add_argument("--messages", type=int, default=200)
+    p.add_argument("--seed", type=int, default=20250801)
+    p.add_argument("--source", default="soakuser")
+    p.add_argument("--mode", choices=["ladder", "soak", "both"], default="both")
+    p.add_argument("--levels", default="1,2,4,8", help="ladder 并发梯度（逗号分隔）")
+    p.add_argument("--warmup-seconds", type=float, default=30.0)
+    p.add_argument("--queries-per-level", type=int, default=5000)
+    p.add_argument("--concurrency", type=int, default=4)
+    p.add_argument("--duration", type=float, default=1800.0, help="soak 最长持续秒数")
+    p.add_argument("--total-queries", type=int, default=50000, help="soak 查询总数上限")
+    p.add_argument("--rss-interval", type=float, default=5.0, help="RSS 采样间隔秒")
+    p.add_argument("--rss-baseline-after", type=float, default=30.0,
+                   help="RSS 门槛基线取样时刻（秒）；冷启动比单独披露不计门槛")
+    p.add_argument("--writer", action="store_true",
+                   help="加分项：并发读的同时开一个写进程持续导入小批次")
+    p.add_argument("--out", help="报告 JSON 输出路径")
+    p.set_defaults(func=cmd_soak)
 
     return parser
 
