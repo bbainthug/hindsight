@@ -1,0 +1,60 @@
+# Personal Brain 容器化复现（任务包 CAREER-20260915-PB-REPRO-SOAK 任务 A/B）
+#
+# 三个 service 共用同一镜像 personal-brain:repro（由 test 服务构建一次）：
+#   docker compose build                 # 构建（耗时/大小记录于 docs/evals/docker-reproducibility.md）
+#   docker compose run --rm test         # pytest 全量，预期通过数 = 宿主机基线
+#   docker compose run --rm bench        # 10 万条合成数据基准（预热 P95 ≤ 1000ms，§9.2）
+#   docker compose run --rm soak         # 并发梯度 + 长稳（任务 B，报告写 /out）
+#
+# bench/soak 把 ./docs/evals 挂载为 /out，报告 JSON 落在仓库 docs/evals/ 下；
+# 数据库与归档显式放在容器内 /tmp/pb，不写挂载卷、不碰任何宿主真实数据。
+
+services:
+  test:
+    build: .
+    image: personal-brain:repro
+    # Dockerfile ENTRYPOINT 是 brain；测试服务直接运行 pytest
+    # （-q 已在 pyproject addopts 中，重复会叠加成 -qq 吞掉 "N passed" 汇总行）
+    entrypoint: ["pytest"]
+    command: []
+
+  bench:
+    image: personal-brain:repro
+    # --db/--archive-dir 是全局参数，必须位于子命令 bench 之前
+    command:
+      - --db
+      - /tmp/pb/bench.sqlite
+      - --archive-dir
+      - /tmp/pb/archives
+      - bench
+      - --conversations
+      - "500"
+      - --messages
+      - "200"
+      - --repeats
+      - "20"
+      - --out
+      - /out/benchmark-docker.json
+    volumes:
+      - ./docs/evals:/out
+
+  soak:
+    image: personal-brain:repro
+    command:
+      - --db
+      - /tmp/pb/soak.sqlite
+      - --archive-dir
+      - /tmp/pb/archives
+      - soak
+      - --conversations
+      - "500"
+      - --messages
+      - "200"
+      - --mode
+      - both
+      - --rss-baseline-after
+      - "30"
+      - --out
+      - /out/soak-docker.json
+    volumes:
+      - ./docs/evals:/out

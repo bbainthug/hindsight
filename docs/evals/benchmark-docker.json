@@ -1,0 +1,139 @@
+{
+  "environment": {
+    "platform": "Linux-6.8.0-117-generic-aarch64-with-glibc2.41",
+    "machine": "aarch64",
+    "python": "3.12.14",
+    "sqlite": "3.46.1",
+    "cpu_count": 8,
+    "db_size_bytes": 292843520,
+    "measured_at": "2026-09-15T19:24:06.789966Z"
+  },
+  "rows": {
+    "sources": 1,
+    "events": 100000,
+    "event_revisions": 100000,
+    "revision_occurrences": 100000,
+    "event_revisions_fts": 100000
+  },
+  "gate": "常用查询预热 P95 ≤ 1000ms（§9.2）",
+  "passed": true,
+  "results": [
+    {
+      "name": "search_2char_cjk_职业",
+      "kind": "search",
+      "repeats": 20,
+      "p50_ms": 395.725628000946,
+      "p95_ms": 413.74934499981464,
+      "p99_ms": 416.38271900046675,
+      "max_ms": 416.38271900046675,
+      "mean_ms": 397.44812219996675,
+      "result_count": 10,
+      "disclosed_separately": false,
+      "error": null
+    },
+    {
+      "name": "search_4char_cjk_职业方向",
+      "kind": "search",
+      "repeats": 20,
+      "p50_ms": 295.32042800019553,
+      "p95_ms": 308.8912019993586,
+      "p99_ms": 332.0035340002505,
+      "max_ms": 332.0035340002505,
+      "mean_ms": 295.79232920032155,
+      "result_count": 10,
+      "disclosed_separately": false,
+      "error": null
+    },
+    {
+      "name": "search_mixed_AI工程",
+      "kind": "search",
+      "repeats": 20,
+      "p50_ms": 359.64934900039225,
+      "p95_ms": 375.3605929996411,
+      "p99_ms": 531.6738259989506,
+      "max_ms": 531.6738259989506,
+      "mean_ms": 366.3845658498758,
+      "result_count": 10,
+      "disclosed_separately": false,
+      "error": null
+    },
+    {
+      "name": "search_punct_你好世界",
+      "kind": "search",
+      "repeats": 20,
+      "p50_ms": 129.25625999923795,
+      "p95_ms": 134.1438029994606,
+      "p99_ms": 135.00086999920313,
+      "max_ms": 135.00086999920313,
+      "mean_ms": 129.8055191497042,
+      "result_count": 10,
+      "disclosed_separately": false,
+      "error": null
+    },
+    {
+      "name": "search_unique_token",
+      "kind": "search",
+      "repeats": 0,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "p99_ms": 0.0,
+      "max_ms": 0.0,
+      "mean_ms": 0.0,
+      "result_count": 0,
+      "disclosed_separately": true,
+      "error": "TOOL_ERROR QUERY_TOO_BROAD: 回退扫描范围 100000 条超出资源上限 50000；请缩小时间范围或指定来源（QUERY_TOO_BROAD）"
+    },
+    {
+      "name": "recent_7d",
+      "kind": "recent",
+      "repeats": 20,
+      "p50_ms": 123.16560500039486,
+      "p95_ms": 128.15643799876852,
+      "p99_ms": 139.96384799975203,
+      "max_ms": 139.96384799975203,
+      "mean_ms": 123.99221034975199,
+      "result_count": 10,
+      "disclosed_separately": false,
+      "error": null
+    },
+    {
+      "name": "fallback_single_hanzi_安",
+      "kind": "search",
+      "repeats": 0,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "p99_ms": 0.0,
+      "max_ms": 0.0,
+      "mean_ms": 0.0,
+      "result_count": 0,
+      "disclosed_separately": true,
+      "error": "TOOL_ERROR QUERY_TOO_BROAD: 回退扫描范围 100000 条超出资源上限 50000；请缩小时间范围或指定来源（QUERY_TOO_BROAD）"
+    },
+    {
+      "name": "fallback_latin_ai",
+      "kind": "search",
+      "repeats": 0,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "p99_ms": 0.0,
+      "max_ms": 0.0,
+      "mean_ms": 0.0,
+      "result_count": 0,
+      "disclosed_separately": true,
+      "error": "TOOL_ERROR QUERY_TOO_BROAD: 回退扫描范围 100000 条超出资源上限 50000；请缩小时间范围或指定来源（QUERY_TOO_BROAD）"
+    },
+    {
+      "name": "get_event_by_id",
+      "kind": "get_event",
+      "repeats": 20,
+      "p50_ms": 121.8755930003681,
+      "p95_ms": 149.90099200076656,
+      "p99_ms": 151.0055229991849,
+      "max_ms": 151.0055229991849,
+      "mean_ms": 125.9668070500993,
+      "result_count": 1,
+      "disclosed_separately": false,
+      "error": null
+    }
+  ]
+}

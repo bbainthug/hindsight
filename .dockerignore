@@ -1,0 +1,38 @@
+# Personal Brain 容器化复现——构建上下文边界（任务 A）
+# 与 .gitignore 相互独立：即使某文件被 git 追踪，这里也能挡住它进入镜像。
+# 私有数据双保险：evals/private、数据库、真实归档、密钥永不进入构建上下文。
+
+# 版本控制与本地环境
+.git
+.gitignore
+.venv
+.uv-cache
+.pytest_cache
+.ruff_cache
+.mypy_cache
+__pycache__
+**/__pycache__
+*.py[cod]
+
+# 私有数据与真实聊天（工作约定：真实聊天、密钥、数据库不得进入镜像）
+codex_history
+evals/private
+*.sqlite
+**/*.sqlite
+*.sqlite3
+**/*.sqlite3
+*.sqlite-wal
+**/*.sqlite-wal
+*.sqlite-shm
+**/*.sqlite-shm
+*.db
+**/*.db
+*.zip
+**/*.zip
+.env.local
+**/.env.local
+
+# 与本仓库无关的本地目录
+campus-ats-demo
+integrations
+.DS_Store
