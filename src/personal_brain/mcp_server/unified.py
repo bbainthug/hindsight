@@ -5,10 +5,18 @@ from __future__ import annotations
 from personal_brain.mcp_server.service import ToolError, tool_search_history
 from personal_brain.policy.profiles import McpServerConfig
 from personal_brain.retrieval.search import SearchLimits
+from personal_brain.retrieval.semantic_index import SemanticConfig
 from personal_brain.retrieval.vault import search_vault
 
 
-def search_brain(conn, config: McpServerConfig, args: dict, limits: SearchLimits) -> dict:
+def search_brain(
+    conn,
+    config: McpServerConfig,
+    args: dict,
+    limits: SearchLimits,
+    *,
+    semantic_config: SemanticConfig | None = None,
+) -> dict:
     query = args.get("query")
     if not isinstance(query, str) or not query.strip() or len(query) > 1000:
         raise ToolError("INVALID_PARAMS", "query 必须为 1..1000 字符")
@@ -19,6 +27,10 @@ def search_brain(conn, config: McpServerConfig, args: dict, limits: SearchLimits
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         raise ToolError("INVALID_PARAMS", "limit 必须为正整数")
     count = min(count, limits.max_limit, 50)
+    # D-1：mode 透传（hybrid 只作用于聊天历史部分）；缺省走 profile 语义默认
+    mode = args.get("mode")
+    if mode is not None and mode not in ("exact", "hybrid"):
+        raise ToolError("INVALID_PARAMS", "mode 必须为 exact|hybrid")
     allowed = set(config.profile.tools)
     buckets: dict[str, list[dict]] = {}
     status: dict[str, dict] = {}
@@ -39,8 +51,14 @@ def search_brain(conn, config: McpServerConfig, args: dict, limits: SearchLimits
             else:
                 payload = tool_search_history(
                     conn, config.profile,
-                    {**args, "limit": count, "order": args.get("order", "reverse_chronological")},
+                    {
+                        **args,
+                        "limit": count,
+                        "order": args.get("order", "reverse_chronological"),
+                        "mode": mode or config.profile.semantic_default,
+                    },
                     limits, config.timezone,
+                    semantic_config=semantic_config or config.semantic,
                 )
             if "error" in payload:
                 status[name] = {"status": "error", "error": payload["error"]}
@@ -86,7 +104,8 @@ def search_brain(conn, config: McpServerConfig, args: dict, limits: SearchLimits
         ),
         "warnings": list(dict.fromkeys(warnings)),
         "retrieval_note": (
-            "词面检索，必要时换用同义词。按来源交替展示，不代表事实可靠性排名。"
+            "词面检索为主；mode=hybrid 时叠加本地语义召回（语义命中为推断）。"
+            "必要时换用同义词。按来源交替展示，不代表事实可靠性排名。"
             "Vault 修改时间不是事实时间；历史 is_current 仅表示消息版本。"
             "无结果不等于从未发生。用 get_event/get_vault_note 查看原文并核对时间。"
         ),

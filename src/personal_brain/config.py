@@ -38,6 +38,11 @@ class BrainConfig:
     )
     timezone: str = "UTC"  # 自然日期 → 区间边界所用配置时区（§4.4）
     search: SearchLimits = field(default_factory=SearchLimits)
+    # D-1 本地语义检索（可选；未安装依赖时 mode=hybrid 退化为 exact）
+    semantic_model: str = "BAAI/bge-small-zh-v1.5"
+    semantic_cache_dir: str | None = None
+    semantic_chunk_chars: int = 600
+    semantic_chunk_overlap: int = 100
 
     @staticmethod
     def load(config_path: Path | None) -> BrainConfig:
@@ -70,4 +75,20 @@ class BrainConfig:
             ):
                 if key in search:
                     setattr(cfg.search, key, int(search[key]))
+        semantic = data.get("semantic") or {}
+        if isinstance(semantic, dict):
+            if v := semantic.get("model"):
+                cfg.semantic_model = str(v)
+            if v := semantic.get("cache_dir"):
+                cfg.semantic_cache_dir = str(Path(str(v)).expanduser())
+            if v := semantic.get("chunk_chars"):
+                cfg.semantic_chunk_chars = int(v)
+            if v := semantic.get("chunk_overlap"):
+                cfg.semantic_chunk_overlap = int(v)
+        if cfg.semantic_chunk_chars < 1 or not (
+            0 <= cfg.semantic_chunk_overlap < cfg.semantic_chunk_chars
+        ):
+            raise ValueError(
+                "semantic.chunk_chars 必须 > 0 且 0 <= chunk_overlap < chunk_chars"
+            )
         return cfg

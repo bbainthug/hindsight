@@ -19,7 +19,9 @@ import sqlite3
 from personal_brain.history.policy_epoch import current_policy_epoch
 from personal_brain.policy.profiles import AccessProfile
 from personal_brain.retrieval.credentials import redact_known_credentials
+from personal_brain.retrieval.embeddings import EmbeddingProvider
 from personal_brain.retrieval.search import (
+    SEARCH_MODES,
     QueryTooBroad,
     SearchFilters,
     SearchHit,
@@ -28,11 +30,14 @@ from personal_brain.retrieval.search import (
     recent_events,
     search_history,
 )
+from personal_brain.retrieval.semantic_index import SemanticConfig
 
 SCHEMA_VERSION = "0.2"
 CONTENT_TRUST = "untrusted_archive"
 MAX_CONTEXT_RADIUS = 3
 EPOCH_RETRIES = 3
+# 兼容常量：与 retrieval.search.NOTE_EXACT_ONLY 文本一致（exact 模式默认能力说明）。
+# hybrid 模式的 warnings 改为来自 result.notes（推断声明/退化原因）。
 CAPABILITY_NOTE = (
     "语义扩展未实现：同义表达（如“求职/找工作”）需分别检索（§6.3 已知能力边界）"
 )
@@ -152,6 +157,8 @@ def _hit_to_result(conn: sqlite3.Connection, hit: SearchHit) -> dict:
         "snippet": hit.snippet,
         "citation_id": f"pb:{hit.revision_id}",
         "evidence_level": "message_record",
+        "match_kind": hit.match_kind,
+        "semantic_score": hit.semantic_score,
         "source_locator": _occurrence_ref(conn, hit.revision_id),
     }
 
@@ -290,8 +297,15 @@ def tool_search_history(
     args: dict,
     limits: SearchLimits,
     timezone: str = "UTC",
+    embedding_provider: EmbeddingProvider | None = None,
+    semantic_config: SemanticConfig | None = None,
 ) -> dict:
-    """授权匹配结果、游标、覆盖说明（§8 search_history）。"""
+    """授权匹配结果、游标、覆盖说明（§8 search_history）。
+
+    ``embedding_provider``/``semantic_config`` 供评测与基准注入
+    HashEmbeddingProvider（离线确定性）；MCP 常驻路径留空，由
+    search_history 按配置解析本地 provider（查询路径不下载模型）。
+    """
     query = args.get("query")
     if not isinstance(query, str) or not query.strip():
         raise ToolError("INVALID_PARAMS", "query 必须是非空字符串")
@@ -300,6 +314,9 @@ def tool_search_history(
     branch_scope = args.get("branch_scope", "all")
     if branch_scope not in ("selected", "all"):
         raise ToolError("INVALID_PARAMS", f"未知 branch_scope: {branch_scope}")
+    mode = args["mode"] if "mode" in args else profile.semantic_default
+    if mode not in SEARCH_MODES:
+        raise ToolError("INVALID_PARAMS", f"未知 mode: {mode}（可选 exact|hybrid）")
     filters = profile_filters(profile)
     filters = SearchFilters(
         date_from=parse_date_bound(args["date_from"], timezone, end_of_day=False)
@@ -330,12 +347,17 @@ def tool_search_history(
             cursor=args.get("cursor"),
             limits=limits,
             redact_credentials=_remote_delivery(profile),
+            mode=mode,
+            embedding_provider=embedding_provider,
+            semantic_config=semantic_config,
         )
     except QueryTooBroad as exc:
         raise ToolError("QUERY_TOO_BROAD", str(exc)) from exc
     except ValueError as exc:
         raise ToolError("INVALID_PARAMS", str(exc)) from exc
-    warnings = [CAPABILITY_NOTE]
+    # 能力说明动态化（D-1）：exact 保留词面边界说明；hybrid 激活时声明
+    # 语义命中为推断；退化时给出 semantic_unavailable 原因。
+    warnings = list(result.notes)
     if result.credentials_redacted:
         warnings.append(CREDENTIAL_REDACTION_NOTE)
     return _envelope(

@@ -9,6 +9,14 @@ dependencies = [
     "pyyaml>=6.0.3",
 ]
 
+[project.optional-dependencies]
+# D-1 本地语义检索（可选）：核心安装保持零外部服务；
+# 未安装时 mode=hybrid 退化为 exact 并在 notes 说明（不报错）。
+semantic = [
+    "sqlite-vec>=0.1.6",
+    "fastembed>=0.7",
+]
+
 [dependency-groups]
 dev = [
     "mypy>=2.3.1",

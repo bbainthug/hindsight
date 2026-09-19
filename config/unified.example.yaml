@@ -13,6 +13,7 @@ profiles:
     allow_unclassified: false
     delivery_boundary: local_only
     tools: [brain_status, search_brain, search_history, get_event, get_recent_events, search_vault, get_vault_note]
+    semantic_default: exact
     vault_include: ["wiki/*.md", "projects/*.md"]
     vault_exclude: ["wiki/private/*"]
   chatgpt:
@@ -21,9 +22,15 @@ profiles:
     allow_unclassified: false
     delivery_boundary: remote_model_allowed
     tools: [brain_status, search_brain, search_history, get_event, get_recent_events, search_vault, get_vault_note]
+    semantic_default: exact
     vault_include: ["projects/*.md"]
     vault_exclude: []
 search:
   default_limit: 8
   max_limit: 30
   max_text_chars: 6000
+semantic:
+  model: BAAI/bge-small-zh-v1.5
+  # cache_dir: /absolute/path/fastembed
+  chunk_chars: 600
+  chunk_overlap: 100

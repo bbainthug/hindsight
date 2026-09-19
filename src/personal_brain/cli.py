@@ -67,10 +67,14 @@ def _emit_human(data: dict) -> None:
     elif kind == "search":
         for h in data["hits"]:
             mark = "*" if h["is_current"] else " "
+            kind_mark = (
+                "≈" if h.get("match_kind") == "semantic"
+                else "×" if h.get("match_kind") == "both" else ""
+            )
             time_str = h["source_created_at"] or "(时间未知)"
             speaker = f"{h['speaker_type']}:{h['speaker_id'] or ''}"
             print(
-                f"{mark} {time_str} [{h['revision_id'][:28]}] {speaker} "
+                f"{mark}{kind_mark} {time_str} [{h['revision_id'][:28]}] {speaker} "
                 f"对话 {h['conversation_id'][:20]}"
             )
             if h.get("snippet"):
@@ -210,6 +214,8 @@ def cmd_search(args, cfg: BrainConfig, as_json: bool) -> int:
             allow_unclassified=not args.no_unclassified,
         )
         try:
+            from personal_brain.retrieval.semantic_index import SemanticConfig
+
             result = search_history(
                 conn,
                 args.query,
@@ -219,6 +225,13 @@ def cmd_search(args, cfg: BrainConfig, as_json: bool) -> int:
                 limit=args.limit,
                 cursor=args.cursor,
                 limits=sl,
+                mode=args.mode,
+                semantic_config=SemanticConfig(
+                    model_id=cfg.semantic_model,
+                    chunk_chars=cfg.semantic_chunk_chars,
+                    chunk_overlap=cfg.semantic_chunk_overlap,
+                    cache_dir=cfg.semantic_cache_dir,
+                ),
             )
         except QueryTooBroad as exc:
             print(f"QUERY_TOO_BROAD: {exc}", file=sys.stderr)
@@ -399,7 +412,9 @@ def cmd_eval(args, cfg: BrainConfig, as_json: bool) -> int:
             max_text_chars=cfg.search.max_text_chars,
             max_scan=cfg.search.max_scan,
         )
-        report = run_suite(conn, suite, limits=sl, timezone=cfg.timezone)
+        report = run_suite(
+            conn, suite, limits=sl, timezone=cfg.timezone, mode=args.mode
+        )
     finally:
         conn.close()
     out = _json.dumps(asdict(report), ensure_ascii=False, indent=2)
@@ -578,6 +593,79 @@ def cmd_soak(args, cfg: BrainConfig, as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 
 
+def cmd_reindex_semantic(args, cfg: BrainConfig, as_json: bool) -> int:
+    """D-1：构建/增量更新本地语义索引（可选项未装时给出可操作指引）。"""
+    import time as _time
+
+    from personal_brain.retrieval.embeddings import build_provider
+    from personal_brain.retrieval.semantic_index import reindex_semantic
+
+    conn = connect(cfg.db_path)
+    try:
+        try:
+            provider = build_provider(
+                args.provider,
+                args.model or cfg.semantic_model,
+                args.cache_dir or cfg.semantic_cache_dir,
+            )
+        except ImportError:
+            print(
+                "缺少可选依赖。安装：pip install -e '.[semantic]'"
+                "（或 uv sync --extra semantic）。"
+                "离线验证可用 --provider hash（不下载模型）。",
+                file=sys.stderr,
+            )
+            return 2
+        except RuntimeError as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 2
+        if args.provider == "fastembed":
+            print(
+                f"提示：首次运行会从 HuggingFace 下载模型 {provider.model_id}"
+                "（之后缓存本地、离线使用）；embedding 全程本地计算。",
+                file=sys.stderr,
+            )
+        started = _time.perf_counter()
+        try:
+            stats = reindex_semantic(
+                conn,
+                provider,
+                full=args.full,
+                chunk_chars=cfg.semantic_chunk_chars,
+                chunk_overlap=cfg.semantic_chunk_overlap,
+            )
+        except RuntimeError as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 2
+        stats["wall_ms"] = int((_time.perf_counter() - started) * 1000)
+        stats["db_bytes"] = cfg.db_path.stat().st_size
+        if as_json:
+            print(json.dumps(stats, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"语义索引{'全量重建' if stats['mode'] == 'full' else '增量更新'}完成:"
+            )
+            print(
+                f"  模型 {stats['model_id']}（dim={stats['dimension']}）"
+                f" index_version={stats['index_version']}"
+            )
+            print(
+                f"  扫描 {stats['revisions_scanned']} 个可索引版本，"
+                f"新增 embed {stats['revisions_embedded']} 个"
+                f"（+{stats['chunks_new']} chunks）"
+            )
+            print(
+                f"  索引规模 {stats['revisions_total']} 个版本 / "
+                f"{stats['chunks_total']} chunks，耗时 {stats['wall_ms']} ms"
+            )
+            print(
+                "  幂等：重复运行无新增；撤回的来源/事件已从向量与 chunk 中清除。"
+            )
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_recall(args, cfg: BrainConfig, as_json: bool) -> int:
     """Use the same trusted profile and payload as the MCP entry point."""
     import json
@@ -598,7 +686,8 @@ def cmd_recall(args, cfg: BrainConfig, as_json: bool) -> int:
         result = run_with_epoch_retry(
             search_brain, conn, config,
             {"query": args.query, "source": args.source, "limit": args.limit,
-             **({"speaker_type": args.speaker} if args.speaker else {})},
+             **({"speaker_type": args.speaker} if args.speaker else {}),
+             **({"mode": args.mode} if getattr(args, "mode", None) else {})},
             SearchLimits(**config.search_limits),
         )
     finally:
@@ -620,6 +709,10 @@ def cmd_doctor(args, cfg: BrainConfig, as_json: bool) -> int:
     conn = connect_readonly(config.db_path)
     try:
         conn.execute("SELECT revision_id FROM event_revisions LIMIT 1").fetchone()
+        # D-1：语义索引状态（只读；扩展/索引缺失时 available 字段说明原因）
+        from personal_brain.retrieval.semantic_index import semantic_status
+
+        semantic = semantic_status(conn)
     finally:
         conn.close()
     result = {
@@ -627,6 +720,7 @@ def cmd_doctor(args, cfg: BrainConfig, as_json: bool) -> int:
         "profile": config.profile.name,
         "delivery_boundary": config.profile.delivery_boundary,
         "tools": list(config.profile.tools),
+        "semantic_index": semantic,
         "vault_configured": config.vault is not None,
         "vault_root_exists": config.vault.root.is_dir() if config.vault else None,
         "tunnel_client_installed": shutil.which("tunnel-client") is not None,
@@ -656,6 +750,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", choices=["all", "history", "vault"], default="all")
     p.add_argument("--speaker", choices=["owner", "assistant"])
     p.add_argument("--limit", type=int, default=10)
+    p.add_argument(
+        "--mode", choices=["exact", "hybrid"],
+        help="检索模式（默认随 profile semantic_default）",
+    )
     p.set_defaults(func=cmd_recall)
 
     p = sub.add_parser("import-chatgpt", help="导入 ChatGPT 导出（ZIP 或目录）")
@@ -697,6 +795,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", action="append", help="启用 scope 过滤（默认不过滤）")
     p.add_argument("--deny", action="append", help="启用 sensitivity 拒绝过滤")
     p.add_argument("--no-unclassified", action="store_true", help="排除未分类内容")
+    p.add_argument(
+        "--mode", choices=["exact", "hybrid"], default="exact",
+        help="exact=词面精确；hybrid=叠加本地语义召回（缺依赖/索引时退化并说明）",
+    )
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("recent", help="最近事件（专用接口，非全库导出）")
@@ -727,7 +829,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("eval", help="运行评测套件（§9：Recall@10/引用解析/权限断言）")
     p.add_argument("--suite", required=True, help="评测套件 JSON 路径")
+    p.add_argument(
+        "--mode", choices=["exact", "hybrid"], default="exact",
+        help="exact=基线（semantic 用例跳过）；hybrid=含语义用例 + HashEmbedding",
+    )
     p.set_defaults(func=cmd_eval)
+
+    p = sub.add_parser(
+        "reindex-semantic",
+        help="D-1：构建/增量更新本地语义索引（--full 全量重建）",
+    )
+    p.add_argument("--full", action="store_true", help="全量重建（清空现有向量）")
+    p.add_argument(
+        "--provider", choices=["fastembed", "hash"], default="fastembed",
+        help="fastembed=本地 BGE 模型（首次下载）；hash=确定性测试向量（离线）",
+    )
+    p.add_argument("--model", help="覆盖 semantic.model（仅 fastembed）")
+    p.add_argument("--cache-dir", help="覆盖 semantic.cache_dir（仅 fastembed）")
+    p.set_defaults(func=cmd_reindex_semantic)
 
     p = sub.add_parser("bench", help="合成数据性能基准（§9.2：预热 P95，短词单独披露）")
     p.add_argument("--conversations", type=int, default=500)

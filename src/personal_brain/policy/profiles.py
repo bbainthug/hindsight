@@ -17,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from personal_brain.retrieval.semantic_index import SemanticConfig
 from personal_brain.retrieval.vault import VaultConfig
 
 ALLOWED_TOOLS = (
@@ -40,6 +41,7 @@ class AccessProfile:
     tools: tuple[str, ...]
     delivery_boundary: str  # local_only | remote_model_allowed
     transport: str = "stdio_mcp"
+    semantic_default: str = "exact"  # exact | hybrid（D-1：未传 mode 时采用）
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,7 @@ class McpServerConfig:
     profile: AccessProfile
     search_limits: dict[str, int]  # §6.3 可配置项（受 SearchLimits 硬上限钳制）
     vault: VaultConfig | None = None
+    semantic: SemanticConfig = SemanticConfig()
 
 
 def _parse_profile(name: str, raw: dict) -> AccessProfile:
@@ -76,6 +79,11 @@ def _parse_profile(name: str, raw: dict) -> AccessProfile:
     transport = raw.get("transport", "stdio_mcp")
     if transport not in TRANSPORTS:
         raise ProfileConfigError(f"profile {name}: 未知 transport {transport}")
+    semantic_default = raw.get("semantic_default", "exact")
+    if semantic_default not in ("exact", "hybrid"):
+        raise ProfileConfigError(
+            f"profile {name}: semantic_default 必须是 exact|hybrid"
+        )
     return AccessProfile(
         name=name,
         allow_scopes=tuple(scopes),
@@ -84,6 +92,7 @@ def _parse_profile(name: str, raw: dict) -> AccessProfile:
         tools=tuple(tools),
         delivery_boundary=boundary,
         transport=transport,
+        semantic_default=semantic_default,
     )
 
 
@@ -127,10 +136,25 @@ def load_mcp_config(path: Path) -> McpServerConfig:
             )
     if any(t in profile.tools for t in ("search_vault", "get_vault_note")) and vault is None:
         raise ProfileConfigError("Vault 工具需要 vault.root 与 profile.vault_include")
+    semantic_raw = raw.get("semantic") or {}
+    if not isinstance(semantic_raw, dict):
+        raise ProfileConfigError("semantic 必须为映射")
+    cache_dir = semantic_raw.get("cache_dir")
+    semantic = SemanticConfig(
+        model_id=str(semantic_raw.get("model", "BAAI/bge-small-zh-v1.5")),
+        chunk_chars=int(semantic_raw.get("chunk_chars", 600)),
+        chunk_overlap=int(semantic_raw.get("chunk_overlap", 100)),
+        cache_dir=str(Path(str(cache_dir)).expanduser()) if cache_dir else None,
+    )
+    if semantic.chunk_chars < 1 or not (0 <= semantic.chunk_overlap < semantic.chunk_chars):
+        raise ProfileConfigError(
+            "semantic.chunk_chars 必须 > 0 且 0 <= chunk_overlap < chunk_chars"
+        )
     return McpServerConfig(
         db_path=Path(raw["database_path"]).expanduser(),
         timezone=str(raw.get("timezone", "UTC")),
         profile=profile,
         search_limits=dict(raw.get("search", {})),
         vault=vault,
+        semantic=semantic,
     )
