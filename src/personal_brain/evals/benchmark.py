@@ -128,9 +128,33 @@ def run_benchmark(
 ) -> BenchmarkReport:
     report = BenchmarkReport(environment=collect_environment(db_path), rows=_row_counts(conn))
     limits = SearchLimits()
+    # D-1：hybrid 基准用 HashEmbedding（确定性、离线、CI 可跑）；
+    # 先构建语义索引（幂等），依赖缺失时跳过 hybrid 行（bench 不因此失败）。
+    hash_provider = None
+    try:
+        from personal_brain.retrieval.embeddings import HashEmbeddingProvider
+        from personal_brain.retrieval.semantic_index import (
+            SemanticConfig,
+            reindex_semantic,
+        )
+
+        hash_provider = HashEmbeddingProvider()
+        reindex_semantic(conn, hash_provider)
+        hybrid_ready = True
+    except Exception:  # noqa: BLE001 - sqlite-vec 不可用等环境因素
+        hybrid_ready = False
+    hybrid_kwargs: dict = (
+        {
+            "embedding_provider": hash_provider,
+            "semantic_config": SemanticConfig(hash_provider.model_id),
+        }
+        if hybrid_ready and hash_provider is not None
+        else {}
+    )
     impls = {
         "search": lambda args: run_with_epoch_retry(
-            tool_search_history, conn, profile, args, limits, "UTC"
+            tool_search_history, conn, profile, args, limits, "UTC",
+            **hybrid_kwargs,
         ),
         "recent": lambda args: run_with_epoch_retry(
             tool_get_recent_events, conn, profile, args, limits
@@ -139,7 +163,16 @@ def run_benchmark(
             tool_get_event, conn, profile, args, limits
         ),
     }
-    for bq in queries or default_queries():
+    bench_queries = list(queries or default_queries())
+    if hybrid_ready and queries is None:
+        bench_queries.append(
+            BenchQuery(
+                "search_hybrid_职业方向", "search",
+                {"query": "职业方向", "mode": "hybrid"},
+                disclosed_separately=True,
+            )
+        )
+    for bq in bench_queries:
         fn = impls[bq.kind]
         args = dict(bq.args)
         if bq.kind == "get_event":

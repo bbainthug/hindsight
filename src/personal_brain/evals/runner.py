@@ -19,6 +19,7 @@ from personal_brain.evals.citation import resolve_citation
 from personal_brain.evals.suite import EvalCase, EvalSuite
 from personal_brain.mcp_server.service import ToolError, profile_filters, tool_get_event
 from personal_brain.policy.profiles import AccessProfile
+from personal_brain.retrieval.embeddings import EmbeddingProvider
 from personal_brain.retrieval.search import (
     QueryTooBroad,
     SearchFilters,
@@ -42,6 +43,9 @@ class CaseResult:
     citations_resolved: int = 0
     citations_total: int = 0
     returned_event_ids: list[str] = field(default_factory=list)
+    # hybrid 模式下仅由语义通道返回的 event_id（推断命中，§390）：
+    # forbidden_event_ids 断言的是词面区分度，对推断命中不适用（见 _finalize）
+    returned_inferred: list[str] = field(default_factory=list)
     forbidden_seen: list[str] = field(default_factory=list)
     latency_ms: float = 0.0
     error: str | None = None
@@ -144,7 +148,14 @@ def run_suite(
     suite: EvalSuite,
     limits: SearchLimits | None = None,
     timezone: str = "UTC",
+    mode: str = "exact",
 ) -> EvalReport:
+    """跑评测套件。
+
+    mode="exact"：基线；type="semantic" 的用例跳过（不计门槛）。
+    mode="hybrid"：语义用例用 HashEmbeddingProvider 参与评分（CI 离线），
+    其余用例与基线一致——回归门要求 hybrid 在原用例上 Recall@10 ≥ exact。
+    """
     limits = limits or SearchLimits()
     violations = check_preconditions(conn, suite)
     if violations:
@@ -168,9 +179,27 @@ def run_suite(
             precondition_failures=violations,
         )
     filters = profile_filters(suite.profile)
+    if mode not in ("exact", "hybrid"):
+        raise ValueError(f"未知 mode: {mode}")
+    semantic_provider = None
+    if mode == "hybrid":
+        from personal_brain.retrieval.embeddings import HashEmbeddingProvider
+        from personal_brain.retrieval.semantic_index import reindex_semantic
+
+        # 评测库自带语义索引（幂等）：HashEmbedding 保证 CI 离线、确定性
+        semantic_provider = HashEmbeddingProvider()
+        reindex_semantic(conn, semantic_provider)
+    active = [
+        case for case in suite.cases
+        if mode == "hybrid" or case.type != "semantic"
+    ]
+    skipped_semantic = len(suite.cases) - len(active)
     results = [
-        _run_case(conn, suite.profile, case, filters, limits, timezone)
-        for case in suite.cases
+        _run_case(
+            conn, suite.profile, case, filters, limits, timezone,
+            mode=mode, semantic_provider=semantic_provider,
+        )
+        for case in active
     ]
 
     answerable = [r.recall_at_k for r in results if r.recall_at_k is not None]
@@ -202,7 +231,7 @@ def run_suite(
             "attribution": result.attribution_rows,
             "forbidden_conclusions": list(case.forbidden_conclusions),
         }
-        for case, result in zip(suite.cases, results, strict=True)
+        for case, result in zip(active, results, strict=True)
         if case.must_distinguish or case.attribution
     ]
     return EvalReport(
@@ -213,6 +242,8 @@ def run_suite(
             "gates": gates,
             "cases_total": len(results),
             "cases_passed": sum(1 for r in results if r.passed),
+            "mode": mode,
+            "skipped_semantic_cases": skipped_semantic,
         },
         human_review=human_review,
     )
@@ -225,6 +256,9 @@ def _run_case(
     base_filters: SearchFilters,
     limits: SearchLimits,
     timezone: str,
+    *,
+    mode: str = "exact",
+    semantic_provider: EmbeddingProvider | None = None,
 ) -> CaseResult:
     res = CaseResult(
         case_id=case.id,
@@ -235,7 +269,10 @@ def _run_case(
         if case.mode == "get_event":
             _execute_get_event(conn, profile, case, limits, res)
         else:
-            _execute_search(conn, case, base_filters, limits, timezone, res)
+            _execute_search(
+                conn, case, base_filters, limits, timezone, res,
+                mode=mode, semantic_provider=semantic_provider,
+            )
     except ToolError as exc:
         res.error = exc.code
         if case.expected_access == "deny" and exc.code == "NOT_FOUND_OR_NOT_ALLOWED":
@@ -275,6 +312,9 @@ def _execute_search(
     limits: SearchLimits,
     timezone: str,
     res: CaseResult,
+    *,
+    mode: str = "exact",
+    semantic_provider: EmbeddingProvider | None = None,
 ) -> None:
     started = _time.perf_counter()
     result = search_history(
@@ -285,9 +325,14 @@ def _execute_search(
         order=case.order,
         limit=TOP_K,
         limits=limits,
+        mode=mode,
+        embedding_provider=semantic_provider,
     )
     res.latency_ms = (_time.perf_counter() - started) * 1000
     res.returned_event_ids = [h.event_id for h in result.hits]
+    res.returned_inferred = [
+        h.event_id for h in result.hits if h.match_kind == "semantic"
+    ]
     res.citations_total = len(result.hits)
     res.attribution_rows = [
         {
@@ -340,7 +385,14 @@ def _finalize(
 ) -> None:
     failures: list[str] = []
     returned = set(res.returned_event_ids)
-    forbidden_seen = sorted(returned & set(case.forbidden_event_ids))
+    # For ordinary allow cases, forbidden_event_ids records lexical distinctions
+    # (for example 「职业方向」 must not be diluted by 「职业」).  A pure semantic
+    # result is an intentional hybrid expansion and is therefore outside that
+    # lexical assertion.  Deny cases are different: every returned citation,
+    # regardless of match kind, must remain forbidden.
+    inferred = set(res.returned_inferred)
+    checked = returned if case.expected_access == "deny" else returned - inferred
+    forbidden_seen = sorted(checked & set(case.forbidden_event_ids))
     res.forbidden_seen = forbidden_seen
     if forbidden_seen:
         failures.append("forbidden_access")
@@ -353,7 +405,8 @@ def _finalize(
     if res.recall_at_k is not None and res.recall_at_k < 0.90:
         failures.append("recall_fail")
     if case.expected_access == "deny":
-        # deny 用例：结果必须为空（search）或不返回（get_event 抛错已在上方处理）
+        # deny 契约：结果必须为空（search）或不返回（get_event）。无论
+        # 命中类型如何，返回内容都属于可见交付，不能绕过拒绝。
         if res.returned_event_ids:
             failures.append("forbidden_access")
     elif not res.returned_event_ids and not case.allowed_refusal:

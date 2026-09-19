@@ -21,6 +21,8 @@ def retrieval_corpus_conversations() -> list[dict]:
     - both 职业规划与求职进展   → all_terms「职业 求职」唯一命中；literal 0
     - early 早期职业思考        → T0-12h，时区边界测试
     - wide ＡＩ工程（全角）     → snippet 原文偏移映射测试
+    - remote01 远程办公         → 语义用例：在家办公/居家办公 → 向量近邻
+    - cv01 简历/CV              → 语义用例：CV ↔ 简历 同义映射
     """
     msgs = [
         ("job01", "user", "我最近正在考虑职业方向变化", T0),
@@ -34,6 +36,9 @@ def retrieval_corpus_conversations() -> list[dict]:
         ("both", "user", "职业规划与求职进展", T0 + 480),
         ("early", "user", "早期职业思考", T0 - 43200),  # 2026-07-31T20:00Z
         ("wide", "user", "ＡＩ工程选型", T0 + 540),
+        # D-1 语义用例锚点：只在 hybrid 模式下应被召回（exact 词面不匹配）
+        ("remote01", "assistant", "公司支持远程办公，居家办公设备可以报销", T0 + 660),
+        ("cv01", "user", "请把简历更新成英文CV版本", T0 + 720),
     ]
     mapping: dict[str, dict] = {}
     _ = [m[0] for m in msgs]  # 顺序即链序；显式连接见下方循环

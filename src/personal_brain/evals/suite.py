@@ -25,7 +25,8 @@ from pathlib import Path
 
 from personal_brain.policy.profiles import AccessProfile
 
-CASE_TYPES = ("keyword", "multi_temporal", "insufficiency", "adversarial")
+CASE_TYPES = ("keyword", "multi_temporal", "insufficiency", "adversarial", "semantic")
+# semantic 用例只在 mode=hybrid 下评分（exact 跑时跳过，不计入门槛）
 
 
 @dataclass(frozen=True)
