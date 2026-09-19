@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from personal_brain.history.policy_epoch import bump_policy_epoch
 from personal_brain.history.timeutil import utc_now_iso
+from personal_brain.retrieval.semantic_index import purge_revision_semantic
 
 
 @dataclass
@@ -85,6 +86,8 @@ def withdraw_source(
             count = _withdraw_revisions(
                 conn, [r["revision_id"] for r in rows], now
             )
+            # §14.2 依赖边 4：撤回与派生索引失效同一事务（D-1 语义向量行）
+            purge_revision_semantic(conn, [r["revision_id"] for r in rows])
             conn.execute(
                 "UPDATE sources SET status = 'withdrawn' WHERE source_id = ?",
                 (source_id,),
@@ -127,6 +130,8 @@ def withdraw_event(
         count = _withdraw_revisions(
             conn, [r["revision_id"] for r in rows], now
         )
+        # §14.2 依赖边 4：撤回与派生索引失效同一事务（D-1 语义向量行）
+        purge_revision_semantic(conn, [r["revision_id"] for r in rows])
     except BaseException:
         conn.rollback()
         raise

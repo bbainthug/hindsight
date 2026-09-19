@@ -72,7 +72,7 @@ class TestMigrationUpgrade:
             version = upgraded.execute(
                 "SELECT MAX(version) v FROM schema_migrations"
             ).fetchone()["v"]
-            assert version == 4
+            assert version == 5
             assert upgraded.execute(
                 "SELECT COUNT(*) c FROM event_revisions_fts"
             ).fetchone()["c"] == 1

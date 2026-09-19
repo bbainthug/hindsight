@@ -18,12 +18,15 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from personal_brain.history.normalization import normalize_with_map, raw_span
 from personal_brain.retrieval.bigram import TermPlan, build_fts_query, plan_term
 from personal_brain.retrieval.credentials import redact_known_credentials
+from personal_brain.retrieval.embeddings import EmbeddingProvider
 from personal_brain.retrieval.fts import fts_match
+from personal_brain.retrieval.semantic_index import SemanticConfig
 
 
 class QueryTooBroad(Exception):
@@ -83,6 +86,17 @@ class SearchHit:
     source_locator: str = ""
     occurrences: list[dict[str, str]] = field(default_factory=list)
     match_span: tuple[int, int] | None = None  # 归一化坐标，内部用于 snippet 还原
+    match_kind: Literal["exact", "semantic", "both"] = "exact"  # D-1
+    semantic_score: float | None = None  # 语义相似度 1/(1+L2距离)；exact-only 为 None
+
+
+# D-1：模式常量与动态说明文案（§390 语义命中必须可区分、可关闭）
+SEARCH_MODES = ("exact", "hybrid")
+NOTE_EXACT_ONLY = (
+    "语义扩展未实现：同义表达（如“求职/找工作”）需分别检索（§6.3 已知能力边界）"
+)
+NOTE_SEMANTIC_INFERRED = "semantic_hits_are_inferred: 语义命中为推断，非原文连续出现"
+RRF_K = 60
 
 
 @dataclass
@@ -95,9 +109,7 @@ class SearchResult:
     path_unknown_conversations: list[str]  # selected 模式下路径未知的对话
     interpreted: dict[str, str | None]  # 解释后的查询区间（§4.4）
     query_plans: list[dict[str, object]]  # 每词检索路径（可验证性）
-    notes: tuple[str, ...] = (
-        "语义扩展未实现：同义表达（如“求职/找工作”）需分别检索（§6.3 已知能力边界）",
-    )
+    notes: tuple[str, ...] = (NOTE_EXACT_ONLY,)
     credentials_redacted: bool = False
 
 
@@ -326,19 +338,78 @@ def _sort_hits(hits: list[SearchHit], order: str) -> list[SearchHit]:
     return sorted(hits, key=lambda h: _sort_key(h, order))
 
 
-def _encode_cursor(hit: SearchHit, order: str) -> str:
-    payload = {"k": [str(x) for x in _sort_key(hit, order)]}
+def _hybrid_sort_key(hit: SearchHit, order: str, rrf: dict[str, float]) -> tuple:
+    """返回稳定游标键；时间序中 RRF 只参与同一时间戳的 tie-break。"""
+    r = rrf.get(hit.revision_id, 0.0)
+    if order == "relevance":
+        return (
+            -r,
+            0 if hit.time_known else 1,
+            hit.source_created_at or "",
+            hit.revision_id,
+        )
+    # 游标键只用于相等匹配；实际 reverse 的降序由 _sort_hits_hybrid 处理。
+    return (
+        0 if hit.time_known else 1,
+        hit.source_created_at or "",
+        -r,
+        hit.revision_id,
+    )
+
+
+def _sort_hits_hybrid(
+    hits: list[SearchHit], order: str, rrf: dict[str, float]
+) -> list[SearchHit]:
+    """按两路 RRF 总分排序；时间序保留时间主序、RRF 仅作同刻 tie-break。"""
+    if order == "relevance":
+        return sorted(hits, key=lambda h: _hybrid_sort_key(h, order, rrf))
+    known = sorted(
+        (h for h in hits if h.time_known),
+        key=lambda h: (h.source_created_at or "", h.revision_id),
+        reverse=order == "reverse_chronological",
+    )
+    known = _restabilize_time(known, rrf)
+    unknown = sorted(
+        (h for h in hits if not h.time_known),
+        key=lambda h: (-rrf.get(h.revision_id, 0.0), h.revision_id),
+    )
+    return known + unknown
+
+
+def _restabilize_time(known: list[SearchHit], rrf: dict[str, float]) -> list[SearchHit]:
+    """时间已排序后，把同时间戳组按 RRF 降序、revision_id 升序排列。"""
+    out: list[SearchHit] = []
+    group: list[SearchHit] = []
+    for h in known:
+        if group and h.source_created_at != group[0].source_created_at:
+            out.extend(
+                sorted(group, key=lambda g: (-rrf.get(g.revision_id, 0.0), g.revision_id))
+            )
+            group = []
+        group.append(h)
+    out.extend(
+        sorted(group, key=lambda g: (-rrf.get(g.revision_id, 0.0), g.revision_id))
+    )
+    return out
+
+
+def _encode_cursor(
+    hit: SearchHit, order: str, key_fn=None
+) -> str:
+    key_fn = key_fn or _sort_key
+    payload = {"k": [str(x) for x in key_fn(hit, order)]}
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
 
 
-def _cursor_start(hits: list[SearchHit], cursor: str, order: str) -> int:
+def _cursor_start(hits: list[SearchHit], cursor: str, order: str, key_fn=None) -> int:
+    key_fn = key_fn or _sort_key
     try:
         data = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
         key = [str(x) for x in data["k"]]
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"无效游标: {exc}") from exc
     for i, hit in enumerate(hits):
-        if [str(x) for x in _sort_key(hit, order)] == key:
+        if [str(x) for x in key_fn(hit, order)] == key:
             return i + 1
     raise ValueError("游标不匹配当前结果集（结果可能已变化）")
 
@@ -392,16 +463,25 @@ def search_history(
     limits: SearchLimits | None = None,
     use_fts: bool = True,
     redact_credentials: bool = False,
+    mode: str = "exact",
+    embedding_provider: EmbeddingProvider | None = None,
+    semantic_config: SemanticConfig | None = None,
 ) -> SearchResult:
     """历史检索主入口。
 
     ``use_fts=False`` 强制全量基线扫描（差分验证用；两者匹配集合
     必须一致，§6.2 候选优化不得改变匹配集合）。
+    ``mode="hybrid"``（D-1）：在 exact 之上叠加本地向量召回通道，
+    RRF 融合；向量候选走与 exact 同一套过滤与授权（§7.3）。任何
+    退化路径（缺依赖/无索引/模型不一致）都不报错，退回 exact 并在
+    notes 说明 ``semantic_unavailable: <reason>``。
     """
     limits = limits or SearchLimits()
     filters = filters or SearchFilters()
     if match_mode not in ("literal", "all_terms"):
         raise ValueError(f"未知 match_mode: {match_mode}")
+    if mode not in SEARCH_MODES:
+        raise ValueError(f"未知 mode: {mode}")
     if order not in ("chronological", "reverse_chronological", "relevance"):
         raise ValueError(f"未知 order: {order}")
     if filters.path_mode not in ("all", "selected"):
@@ -486,9 +566,143 @@ def search_history(
             )
         )
 
+    notes_extra: tuple[str, ...] = ()
+    semantic_plan: dict[str, object] | None = None
+    chunk_spans: dict[str, tuple[int, int]] = {}
+    rrf: dict[str, float] | None = None
+
+    if mode == "hybrid":
+        from personal_brain.retrieval.semantic_index import (
+            KNN_CAP,
+            SEMANTIC_MIN_COSINE,
+            distance_to_cosine,
+            knn_chunks,
+            semantic_unavailable_reason,
+        )
+
+        provider = embedding_provider
+        if provider is not None and semantic_config is None:
+            semantic_config = SemanticConfig(provider.model_id)
+        cfg = semantic_config or SemanticConfig()
+        reason = semantic_unavailable_reason(
+            conn, cfg, provider.dimension if provider is not None else None
+        )
+        if reason is None and provider is None:
+            from personal_brain.retrieval.embeddings import get_or_build_fastembed
+
+            provider = get_or_build_fastembed(cfg.model_id, cfg.cache_dir)
+            if provider is None:
+                reason = "provider_init_failed"
+            else:
+                reason = semantic_unavailable_reason(conn, cfg, provider.dimension)
+        if reason is not None:
+            notes_extra = (f"semantic_unavailable: {reason}",)
+        else:
+            assert provider is not None
+            k_sem = min(eff_limit * 5, KNN_CAP)
+            qvec = provider.embed([norm_query])[0]
+            knn = knn_chunks(conn, qvec, k_sem)
+            semantic_plan = {
+                "path": "semantic",
+                "model": provider.model_id,
+                "k": k_sem,
+                "filtered": 0,
+            }
+            if knn:
+                # KNN 全局候选 → 与 exact 同一套 _filter_sql 过滤（§7.3 不可妥协）
+                ordered_knn = sorted(
+                    knn,
+                    key=lambda row: (
+                        float(row["distance"]),
+                        row["revision_id"],
+                        int(row["chunk_id"]),
+                    ),
+                )
+                cand_ids: list[str] = []
+                for kr in ordered_knn:
+                    if kr["revision_id"] not in cand_ids:
+                        cand_ids.append(kr["revision_id"])
+                sparams: list = []
+                ssql = _filter_sql(filters, sparams)
+                ssql += (
+                    " AND r.revision_id IN ("
+                    + ",".join("?" for _ in cand_ids)
+                    + ")"
+                )
+                srows = {
+                    r["revision_id"]: r
+                    for r in conn.execute(ssql, [*sparams, *cand_ids]).fetchall()
+                }
+                # 距离升序保留每个 revision 的最优 chunk；selected 路径约束一致
+                sem_best: dict[str, tuple[float, int, int]] = {}
+                for kr in ordered_knn:
+                    rid = kr["revision_id"]
+                    if rid not in srows or rid in sem_best:
+                        continue
+                    if distance_to_cosine(float(kr["distance"])) < SEMANTIC_MIN_COSINE:
+                        continue  # ANN 噪声下限（§docs 语义检索）
+                    if (
+                        selected_events is not None
+                        and srows[rid]["event_id"] not in selected_events
+                    ):
+                        continue
+                    sem_best[rid] = (
+                        float(kr["distance"]),
+                        int(kr["text_start"]),
+                        int(kr["text_end"]),
+                    )
+                semantic_plan["filtered"] = len(sem_best)
+                if sem_best:
+                    rrf = {}
+                    exact_ranked = _sort_hits(hits, order) if hits else []
+                    for rank, h in enumerate(exact_ranked, start=1):
+                        rrf[h.revision_id] = 1.0 / (RRF_K + rank)
+                    for rank, (rid, (_dist, _s, _e)) in enumerate(
+                        sorted(sem_best.items(), key=lambda kv: (kv[1][0], kv[0])), start=1
+                    ):
+                        rrf[rid] = rrf.get(rid, 0.0) + 1.0 / (RRF_K + rank)
+                    exact_rids = {h.revision_id for h in hits}
+                    for h in hits:
+                        if h.revision_id in sem_best:
+                            h.match_kind = "both"
+                            h.semantic_score = 1.0 / (1.0 + sem_best[h.revision_id][0])
+                    by_rid.update(srows)
+                    for rid, (dist, tstart, tend) in sem_best.items():
+                        if rid in exact_rids:
+                            continue
+                        row = srows[rid]
+                        chunk_spans[rid] = (tstart, tend)
+                        hits.append(
+                            SearchHit(
+                                event_id=row["event_id"],
+                                revision_id=rid,
+                                is_current=row["current_revision_id"] == rid,
+                                conversation_id=row["conversation_id"],
+                                speaker_id=row["speaker_id"],
+                                speaker_type=row["speaker_type"],
+                                content_type=row["content_type"],
+                                source_created_at=row["source_created_at"],
+                                time_known=row["source_created_at"] is not None,
+                                score=0,
+                                raw_text=None,
+                                source_locator=row["source_locator"],
+                                match_span=None,
+                                match_kind="semantic",
+                                semantic_score=1.0 / (1.0 + dist),
+                            )
+                        )
+            notes_extra = (NOTE_SEMANTIC_INFERRED,)
+
     total_matched = len(hits)
-    hits = _sort_hits(hits, order)
-    start_index = _cursor_start(hits, cursor, order) if cursor else 0
+    key_fn = None
+    if rrf is not None:
+        hits = _sort_hits_hybrid(hits, order, rrf)
+        key_fn = lambda h, o: _hybrid_sort_key(h, o, rrf)  # noqa: E731
+    else:
+        hits = _sort_hits(hits, order)
+    start_index = (
+        _cursor_start(hits, cursor, order, key_fn) if cursor else 0
+    )
     page = hits[start_index : start_index + eff_limit]
     truncated = (start_index + eff_limit) < total_matched
 
@@ -532,6 +746,19 @@ def search_history(
                     limits.snippet_chars,
                 )
                 hit.snippet = _render_snippet(safe_text, window)
+            elif (
+                row["search_text"]
+                and hit.match_span is None
+                and hit.revision_id in chunk_spans
+            ):
+                # D-1：语义命中没有 match_span，snippet 用所属 chunk 的窗口
+                window = _snippet_window(
+                    original_text,
+                    row["search_text"],
+                    chunk_spans[hit.revision_id],
+                    limits.snippet_chars,
+                )
+                hit.snippet = _render_snippet(safe_text, window)
         hit.occurrences = [
             {
                 "account_namespace": o["account_namespace"],
@@ -552,22 +779,29 @@ def search_history(
         ]
     _apply_text_budget(page, limits)
 
+    plans_payload: list[dict[str, object]] = [
+        {
+            "term": p.term,
+            "fts_tokens": list(p.fts_tokens),
+            "fallback": p.needs_fallback,
+        }
+        for p in plans
+    ]
+    if semantic_plan is not None:
+        plans_payload.append(semantic_plan)
+
     return SearchResult(
         hits=page,
         total_matched=total_matched,
         truncated=truncated,
-        next_cursor=_encode_cursor(page[-1], order) if truncated and page else None,
+        next_cursor=(
+            _encode_cursor(page[-1], order, key_fn) if truncated and page else None
+        ),
         undated_excluded=_count_undated(conn, filters),
         path_unknown_conversations=path_unknown,
         interpreted={"date_from": filters.date_from, "date_to": filters.date_to},
-        query_plans=[
-            {
-                "term": p.term,
-                "fts_tokens": list(p.fts_tokens),
-                "fallback": p.needs_fallback,
-            }
-            for p in plans
-        ],
+        query_plans=plans_payload,
+        notes=notes_extra if mode == "hybrid" else (NOTE_EXACT_ONLY,),
         credentials_redacted=credentials_redacted,
     )
 

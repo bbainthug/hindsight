@@ -259,6 +259,37 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE event_revisions_fts_v2 RENAME TO event_revisions_fts;
         """,
     ),
+    (
+        5,
+        """
+        -- D-1 本地语义索引（§659 可重建 RetrievalIndex 契约）。
+        -- 只建普通表；vec0 虚拟表的维度由 provider 汇报（bge-small-zh=512、
+        -- 测试 hash=256），且需要加载 sqlite-vec 扩展，因此由
+        -- retrieval/semantic_index.ensure_vector_table 在构建时按维度
+        -- 动态创建（DROP+CREATE），不在迁移里写死维度。
+        -- 索引是派生数据（§3.2 L3）：可从 L1 全量重建；备份 manifest 不含。
+        CREATE TABLE semantic_index_meta (
+            id            INTEGER PRIMARY KEY CHECK (id = 1),
+            model_id      TEXT NOT NULL,
+            dimension     INTEGER NOT NULL,
+            chunk_chars   INTEGER NOT NULL,
+            chunk_overlap INTEGER NOT NULL,
+            index_version TEXT NOT NULL,
+            built_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE revision_chunks (
+            chunk_id    INTEGER PRIMARY KEY,
+            revision_id TEXT NOT NULL REFERENCES event_revisions(revision_id),
+            chunk_index INTEGER NOT NULL,
+            text_start  INTEGER NOT NULL,
+            text_end    INTEGER NOT NULL,
+            UNIQUE (revision_id, chunk_index)
+        );
+        CREATE INDEX ix_revision_chunks_revision
+            ON revision_chunks(revision_id);
+        """,
+    ),
 ]
 
 
