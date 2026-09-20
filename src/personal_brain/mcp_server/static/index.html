@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Hindsight 远程查询</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a;
+    --bg: #ffffff;
+    --muted: #666666;
+    --border: #dddddd;
+    --accent: #2563eb;
+    --warn-bg: #fff6e5;
+    --warn-fg: #7a4d00;
+    --badge-bg: #eef2ff;
+    --badge-fg: #3730a3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #eaeaea;
+      --bg: #121212;
+      --muted: #999999;
+      --border: #333333;
+      --accent: #60a5fa;
+      --warn-bg: #3a2e00;
+      --warn-fg: #ffd875;
+      --badge-bg: #1e2440;
+      --badge-fg: #a5b4fc;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding-bottom: 72px;
+  }
+  header {
+    padding: 12px 16px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-size: 17px;
+    margin: 0 0 8px;
+  }
+  form#search-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 16px 12px;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 auto; min-width: 0; }
+  input, select, button {
+    font-size: 16px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  button.secondary {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+  }
+  .toggle-group { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .toggle-group button {
+    flex: 1;
+    background: var(--bg);
+    color: var(--fg);
+    border-radius: 0;
+    font-weight: 500;
+  }
+  .toggle-group button.active { background: var(--accent); color: #fff; }
+  main { padding: 8px 16px 16px; }
+  .status-line { font-size: 13px; color: var(--muted); padding: 4px 0 12px; }
+  .result {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+  .result .meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 12px;
+    color: var(--muted);
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .badge {
+    display: inline-block;
+    background: var(--badge-bg);
+    color: var(--badge-fg);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge.inferred { background: #fde68a; color: #78350f; }
+  .snippet { font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .expand {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+    font-size: 13.5px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .expand .revision { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .load-more { margin-top: 6px; }
+  .empty, .error { color: var(--muted); font-size: 14px; padding: 16px 0; }
+  .error { color: #b91c1c; }
+  footer {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    background: var(--warn-bg);
+    color: var(--warn-fg);
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  #status-line-inner { color: var(--muted); }
+  .spinner { font-size: 13px; color: var(--muted); padding: 8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hindsight 远程查询</h1>
+</header>
+
+<form id="search-form">
+  <input id="q" type="search" placeholder="搜索关键词" autocomplete="off" required>
+  <div class="row">
+    <div class="toggle-group" id="mode-toggle">
+      <button type="button" data-mode="exact" class="active">exact</button>
+      <button type="button" data-mode="hybrid">hybrid</button>
+    </div>
+    <select id="speaker">
+      <option value="">全部说话者</option>
+      <option value="owner">owner</option>
+      <option value="assistant">assistant</option>
+    </select>
+  </div>
+  <div class="row">
+    <input id="date-from" type="date" aria-label="起始日期">
+    <input id="date-to" type="date" aria-label="结束日期">
+  </div>
+  <button type="submit">搜索</button>
+</form>
+
+<main>
+  <div id="results"></div>
+</main>
+
+<footer>
+  <div id="status-line-inner">加载状态中…</div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var state = { mode: "exact" };
+
+  var form = document.getElementById("search-form");
+  var qInput = document.getElementById("q");
+  var speakerSelect = document.getElementById("speaker");
+  var dateFrom = document.getElementById("date-from");
+  var dateTo = document.getElementById("date-to");
+  var modeToggle = document.getElementById("mode-toggle");
+  var resultsEl = document.getElementById("results");
+  var statusLine = document.getElementById("status-line-inner");
+
+  modeToggle.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-mode]");
+    if (!btn) return;
+    state.mode = btn.getAttribute("data-mode");
+    Array.prototype.forEach.call(modeToggle.querySelectorAll("button"), function (b) {
+      b.classList.toggle("active", b === btn);
+    });
+  });
+
+  function qs(params) {
+    var parts = [];
+    Object.keys(params).forEach(function (k) {
+      var v = params[k];
+      if (v === undefined || v === null || v === "") return;
+      parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(v));
+    });
+    return parts.join("&");
+  }
+
+  function fetchJson(url) {
+    return fetch(url, { credentials: "same-origin" }).then(function (resp) {
+      return resp.json().then(function (body) {
+        if (!resp.ok) {
+          var err = new Error((body && body.error) || ("HTTP " + resp.status));
+          err.status = resp.status;
+          err.body = body;
+          throw err;
+        }
+        return body;
+      });
+    });
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return "时间未知";
+    return String(ts).replace("T", " ").replace(/\.\d+Z?$/, "");
+  }
+
+  function matchBadge(kind) {
+    if (kind === "semantic" || kind === "both") {
+      return '<span class="badge inferred">推断（语义）</span>';
+    }
+    return '<span class="badge">精确</span>';
+  }
+
+  function renderResults(payload) {
+    resultsEl.innerHTML = "";
+    if (!payload.results || payload.results.length === 0) {
+      resultsEl.innerHTML = '<div class="empty">没有匹配结果。</div>';
+      return;
+    }
+    (payload.warnings || []).forEach(function (w) {
+      var div = document.createElement("div");
+      div.className = "status-line";
+      div.textContent = "提示：" + w;
+      resultsEl.appendChild(div);
+    });
+    payload.results.forEach(function (item) {
+      var card = document.createElement("div");
+      card.className = "result";
+      card.innerHTML =
+        '<div class="meta">' +
+        "<span>" + fmtTime(item.timestamp) + "</span>" +
+        '<span class="badge">' + (item.speaker_type || "unknown") + "</span>" +
+        matchBadge(item.match_kind) +
+        "</div>" +
+        '<div class="snippet"></div>' +
+        '<button type="button" class="secondary expand-btn" style="margin-top:8px;">展开原文</button>' +
+        '<div class="expand" hidden></div>';
+      card.querySelector(".snippet").textContent = item.snippet || "";
+      var expandBtn = card.querySelector(".expand-btn");
+      var expandBox = card.querySelector(".expand");
+      var offset = 0;
+      expandBtn.addEventListener("click", function () {
+        if (!expandBox.hidden) { expandBox.hidden = true; return; }
+        expandBox.hidden = false;
+        if (expandBox.dataset.loaded) return;
+        loadEvent(item.event_id, 0, expandBox);
+        expandBox.dataset.loaded = "1";
+      });
+      resultsEl.appendChild(card);
+    });
+    if (payload.truncated && payload.next_cursor) {
+      var more = document.createElement("button");
+      more.type = "button";
+      more.className = "secondary load-more";
+      more.textContent = "加载更多";
+      more.addEventListener("click", function () {
+        more.remove();
+        runSearch(payload.next_cursor, true);
+      });
+      resultsEl.appendChild(more);
+    }
+  }
+
+  function loadEvent(eventId, offset, container) {
+    container.innerHTML = '<div class="spinner">加载中…</div>';
+    fetchJson("/api/event/" + encodeURIComponent(eventId) + "?" + qs({ text_offset: offset, context_radius: 0 }))
+      .then(function (payload) {
+        var item = (payload.results || [])[0];
+        if (!item) {
+          container.innerHTML = '<div class="error">无法加载原文</div>';
+          return;
+        }
+        var text = document.createElement("div");
+        text.textContent = (container.dataset.text || "") + (item.raw_text || "");
+        container.dataset.text = text.textContent;
+        var revisionLine = '<div class="revision">revision_id: ' + item.revision_id + "</div>";
+        var moreBtn = "";
+        if (item.next_text_offset !== null && item.next_text_offset !== undefined) {
+          moreBtn = '<button type="button" class="secondary load-more" data-next="' + item.next_text_offset + '">加载更多原文</button>';
+        }
+        container.innerHTML = "";
+        var body = document.createElement("div");
+        body.textContent = container.dataset.text;
+        container.appendChild(body);
+        var meta = document.createElement("div");
+        meta.innerHTML = revisionLine + moreBtn;
+        container.appendChild(meta);
+        var btn = meta.querySelector(".load-more");
+        if (btn) {
+          btn.addEventListener("click", function () {
+            loadEvent(eventId, parseInt(btn.getAttribute("data-next"), 10), container);
+          });
+        }
+      })
+      .catch(function (err) {
+        container.innerHTML = '<div class="error">加载失败：' + (err.message || "未知错误") + "</div>";
+      });
+  }
+
+  function runSearch(cursor, append) {
+    var q = qInput.value.trim();
+    if (!q) return;
+    if (!append) resultsEl.innerHTML = '<div class="spinner">搜索中…</div>';
+    var params = {
+      q: q,
+      mode: state.mode,
+      speaker: speakerSelect.value,
+      from: dateFrom.value,
+      to: dateTo.value,
+      cursor: cursor || undefined,
+    };
+    fetchJson("/api/search?" + qs(params))
+      .then(function (payload) {
+        if (append) {
+          var frag = resultsEl;
+          var prev = frag.innerHTML;
+          renderResults(payload);
+          frag.innerHTML = prev.replace(/<button[^>]*load-more[^>]*>[^<]*<\/button>/, "") + frag.innerHTML;
+        } else {
+          renderResults(payload);
+        }
+      })
+      .catch(function (err) {
+        resultsEl.innerHTML = '<div class="error">搜索失败：' + (err.message || "未知错误") + "</div>";
+      });
+  }
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    runSearch(null, false);
+  });
+
+  function loadStatus() {
+    fetchJson("/api/status")
+      .then(function (payload) {
+        var cov = payload.coverage || {};
+        var boundary = (payload.capabilities && payload.capabilities.delivery_boundary) || "unknown";
+        statusLine.textContent =
+          "覆盖期 " + fmtTime(cov.known_start) + " ~ " + fmtTime(cov.known_end) +
+          "　·　delivery_boundary=" + boundary +
+          "　·　远程 profile，凭据已遮蔽、敏感内容不可见";
+      })
+      .catch(function (err) {
+        statusLine.textContent = "状态加载失败：" + (err.message || "未知错误");
+      });
+  }
+
+  loadStatus();
+})();
+</script>
+</body>
+</html>

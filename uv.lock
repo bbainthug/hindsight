@@ -487,6 +487,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+remote = [
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
 semantic = [
     { name = "fastembed" },
     { name = "sqlite-vec" },
@@ -494,6 +498,7 @@ semantic = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
@@ -506,11 +511,14 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "sqlite-vec", marker = "extra == 'semantic'", specifier = ">=0.1.6" },
+    { name = "starlette", marker = "extra == 'remote'", specifier = ">=0.47" },
+    { name = "uvicorn", marker = "extra == 'remote'", specifier = ">=0.34" },
 ]
-provides-extras = ["semantic"]
+provides-extras = ["semantic", "remote"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.6" },

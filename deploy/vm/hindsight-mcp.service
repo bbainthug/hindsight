@@ -1,0 +1,24 @@
+[Unit]
+Description=Hindsight personal-brain-mcp (HTTP transport, remote access)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/hindsight
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/hindsight/env
+ExecStart=%h/.local/bin/uv run personal-brain-mcp --config %h/brain-data/remote.yaml --transport http --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+# 机器只有 1 GB 内存；进程默认只绑回环，不需要更多。
+MemoryMax=600M
+
+# 只读服务：额外的最小权限加固（systemd --user 已在用户命名空间内运行，不是 root）。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.cache
+
+[Install]
+WantedBy=default.target

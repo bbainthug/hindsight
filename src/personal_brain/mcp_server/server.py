@@ -1,8 +1,10 @@
-"""只读 MCP 服务（§8/§16）：stdio 传输，`personal-brain-mcp --config <path>`。
+"""只读 MCP 服务（§8/§16）：`personal-brain-mcp --config <path> [--transport stdio|http]`。
 
 - 保留 §8 的 4 个历史工具；按启动 profile 可增加 3 个统一/Vault 工具。
   不暴露未实现的 current-state 或 Memory 工具。
-- 服务端不调用远程 LLM、不开网络监听（§7.5 首版边界）。
+- stdio 默认；HTTP 需显式开启（`--transport http`）且仅监听回环，除非显式传
+  `--host 0.0.0.0 --i-know-this-is-public`（D-3：公网侧由前置反向代理承担
+  TLS/身份，服务端仍保持只读，不调用远程 LLM）。
 - profile 由受信任启动配置绑定（§7.3），不是 tool 参数。
 """
 
@@ -11,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -309,17 +312,69 @@ async def _run_stdio(config: McpServerConfig) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="personal-brain-mcp", description="Personal Brain 只读 MCP 服务（stdio）"
+        prog="personal-brain-mcp",
+        description="Personal Brain 只读 MCP 服务（stdio 默认，可选 HTTP）",
     )
     parser.add_argument("--config", required=True, help="受信任启动配置（绑定 profile）")
+    parser.add_argument(
+        "--transport", choices=["stdio", "http"], default="stdio",
+        help="stdio（默认，行为不变）或 http（D-3 远程接入，需要可选依赖组 remote）",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="仅 http：监听地址，默认回环")
+    parser.add_argument("--port", type=int, default=8765, help="仅 http：监听端口，默认 8765")
+    parser.add_argument(
+        "--i-know-this-is-public", action="store_true",
+        help="仅 http：显式确认允许 --host 绑定非回环地址（否则拒绝启动）",
+    )
     args = parser.parse_args(argv)
     try:
         config = load_mcp_config(Path(args.config))
     except (ValueError, FileNotFoundError) as exc:
         print(f"配置错误: {exc}", file=sys.stderr)
         return 2
+
+    if args.transport == "stdio":
+        try:
+            asyncio.run(_run_stdio(config))
+        except KeyboardInterrupt:
+            return 0
+        return 0
+
+    return _main_http(config, args)
+
+
+def _main_http(config: McpServerConfig, args: argparse.Namespace) -> int:
+    if args.host != "127.0.0.1" and not args.i_know_this_is_public:
+        print(
+            "拒绝启动：--host 非 127.0.0.1 需要同时传 --i-know-this-is-public。\n"
+            "进程默认只绑回环；公网侧 TLS/身份由前置反向代理（如 Cloudflare Tunnel）承担，"
+            "不要在服务端直接暴露公网监听。",
+            file=sys.stderr,
+        )
+        return 2
+
+    token = os.environ.get("BRAIN_MCP_TOKEN", "")
     try:
-        asyncio.run(_run_stdio(config))
+        token_bytes = bytes.fromhex(token)
+    except ValueError:
+        token_bytes = b""
+    if len(token_bytes) < 32:
+        print(
+            "拒绝启动：环境变量 BRAIN_MCP_TOKEN 未设置或不是 ≥32 字节的随机 hex 串。\n"
+            "生成命令：python3 -c \"import secrets; print(secrets.token_hex(32))\"\n"
+            "然后：export BRAIN_MCP_TOKEN=<生成的值>",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        from personal_brain.mcp_server.http_app import run_http
+    except ImportError as exc:
+        print(f"拒绝启动：{exc}", file=sys.stderr)
+        return 2
+
+    try:
+        run_http(config, host=args.host, port=args.port, token=token)
     except KeyboardInterrupt:
         return 0
     return 0

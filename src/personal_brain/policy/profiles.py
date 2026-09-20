@@ -52,6 +52,10 @@ class McpServerConfig:
     search_limits: dict[str, int]  # §6.3 可配置项（受 SearchLimits 硬上限钳制）
     vault: VaultConfig | None = None
     semantic: SemanticConfig = SemanticConfig()
+    # D-3 远程接入（可选）：设置后 HTTP 模式的 REST/页面校验
+    # Cf-Access-Jwt-Assertion；缺省则不校验（HTTP 服务端启动时打印警告）。
+    access_aud: str | None = None
+    access_team_domain: str | None = None
 
 
 def _parse_profile(name: str, raw: dict) -> AccessProfile:
@@ -150,6 +154,15 @@ def load_mcp_config(path: Path) -> McpServerConfig:
         raise ProfileConfigError(
             "semantic.chunk_chars 必须 > 0 且 0 <= chunk_overlap < chunk_chars"
         )
+    remote_raw = raw.get("remote") or {}
+    if not isinstance(remote_raw, dict):
+        raise ProfileConfigError("remote 必须为映射")
+    access_aud = remote_raw.get("access_aud")
+    access_team_domain = remote_raw.get("access_team_domain")
+    if bool(access_aud) != bool(access_team_domain):
+        raise ProfileConfigError(
+            "remote.access_aud 与 remote.access_team_domain 必须同时设置或同时省略"
+        )
     return McpServerConfig(
         db_path=Path(raw["database_path"]).expanduser(),
         timezone=str(raw.get("timezone", "UTC")),
@@ -157,4 +170,6 @@ def load_mcp_config(path: Path) -> McpServerConfig:
         search_limits=dict(raw.get("search", {})),
         vault=vault,
         semantic=semantic,
+        access_aud=str(access_aud) if access_aud else None,
+        access_team_domain=str(access_team_domain) if access_team_domain else None,
     )

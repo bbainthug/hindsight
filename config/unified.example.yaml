@@ -25,6 +25,15 @@ profiles:
     semantic_default: exact
     vault_include: ["projects/*.md"]
     vault_exclude: []
+  # D-3 远程接入示例（personal-brain-mcp --config X --transport http）：
+  # 与 local/chatgpt 同一套 profile 机制，只是绑定给 HTTP transport 使用。
+  remote:
+    allow_scopes: [career, projects, learning, technical_preferences]
+    deny_sensitivity: [secret, third_party_sensitive]
+    allow_unclassified: false
+    delivery_boundary: remote_model_allowed
+    tools: [brain_status, search_history, get_recent_events, get_event]
+    semantic_default: exact
 search:
   default_limit: 8
   max_limit: 30
@@ -34,3 +43,10 @@ semantic:
   # cache_dir: /absolute/path/fastembed
   chunk_chars: 600
   chunk_overlap: 100
+# D-3 远程接入（可选；仅 --transport http 时生效）：设置后服务端才校验
+# Cf-Access-Jwt-Assertion；缺省时 REST/页面完全信任前置的 Cloudflare Access，
+# 启动日志会打印醒目警告。MCP 路径（/mcp/<token>）不受此项影响，见
+# docs/remote-access.md 的威胁模型一节。
+# remote:
+#   access_aud: <Cloudflare Access 应用的 AUD>
+#   access_team_domain: <your-team>.cloudflareaccess.com

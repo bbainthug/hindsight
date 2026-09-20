@@ -1,0 +1,45 @@
+# cloudflared 隧道配置示例（占位符，不含真实域名/凭据）。
+#
+# 复制到 ~/.cloudflared/config.yml 并替换：
+# - <TUNNEL_ID>：由 `cloudflared tunnel create hindsight-mcp` 生成
+# - brain.example.com：你的真实子域名（需先在 Cloudflare 托管该域名）
+#
+# 步骤（VM 上执行）：
+#   cloudflared tunnel login
+#   cloudflared tunnel create hindsight-mcp
+#   cloudflared tunnel route dns hindsight-mcp brain.example.com
+#   cloudflared tunnel run hindsight-mcp
+#
+# 生产建议用 systemd --user 常驻运行 cloudflared（同 install.sh 的模式），
+# 这里只给隧道本身的配置文件。
+
+tunnel: <TUNNEL_ID>
+credentials-file: /home/YOUR_USER/.cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  # 唯一转发目标：本机回环上的 Hindsight HTTP transport。
+  # MCP（/mcp/<token>）与 REST/页面（/api/*、/）走同一端口，同一条规则。
+  - hostname: brain.example.com
+    service: http://127.0.0.1:8765
+  # 其余一律 404（不做兜底转发，避免误路由到本机其他服务）。
+  - service: http_status:404
+
+# ---------------------------------------------------------------------------
+# Cloudflare Access（在 Cloudflare Zero Trust 控制台配置，非本文件内容）：
+#
+# 1. Access > Applications > Add an application > Self-hosted
+#    - Application domain: brain.example.com
+#    - Session duration: 按需（建议 24h）
+# 2. Policies：
+#    - Action: Allow
+#    - Include: Emails → 只填你自己的邮箱（一次性 OTP 登录，不建立密码）
+# 3. 关键：给 /mcp/* 路径单独加一条 Bypass 策略
+#    - 新建一条 policy，Path 限定为 /mcp/*，Action: Bypass
+#    - 原因：claude.ai / 手机端等远程 MCP 连接器无法完成 Access 登录跳转，
+#      也无法附带自定义 header；MCP 路径本身已经用高熵 token 做访问控制
+#      （见 docs/remote-access.md 威胁模型一节），Access 只保护 REST/页面。
+# 4. 服务端可选校验（更强防御，非必需）：在 remote.yaml 里设置
+#    remote.access_aud（该 Application 的 AUD 值，控制台可复制）+
+#    remote.access_team_domain（形如 your-team.cloudflareaccess.com），
+#    服务端会用 Cloudflare JWKS 校验 Cf-Access-Jwt-Assertion。
+# ---------------------------------------------------------------------------
