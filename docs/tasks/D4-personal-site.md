@@ -20,7 +20,7 @@
 2. 内容目录用 Markdown/MDX，分 4 类集合：`notes/`（所见所想）、`music/`、`films/`、`about`
 3. 媒体：图片直接进仓库（单文件 < 5 MB）；音频等大文件走 **Cloudflare R2**（免费 10 GB），站内用
    `<audio>` 播放，R2 通过自定义子域 `media.bbainthug.tech` 提供
-4. 访问控制：Pages 域名挂 Cloudflare Access（Allow：popiwingo@gmail.com），`media.` 同样挂
+4. 访问控制：Pages 域名挂 Cloudflare Access（Allow：<我的邮箱>），`media.` 同样挂
 5. 发布流程：`git push main` → Pages 自动构建；本地 `npm run dev` 预览
 6. 一个上传脚本 `scripts/upload-media.sh <文件>`：把音频/视频传到 R2 并打印可用 URL
 
@@ -48,7 +48,7 @@
 
 - Pages 项目名 `bbainthug-site`，生产分支 `main`，自定义域 `bbainthug.tech` + `www` 重定向到根。
 - Access 应用：`bbainthug.tech`、`www.bbainthug.tech`、`media.bbainthug.tech` 三个 destination，
-  同一条 Allow 策略（Emails = popiwingo@gmail.com），会话 1 个月。
+  同一条 Allow 策略（Emails = <我的邮箱>），会话 1 个月。
   Pages 的 `*.pages.dev` 预览域名也要挂 Access 或禁用，不能留后门。
 - R2 bucket `bbainthug-media`，**不开公共读**，只通过 `media.` 自定义域（在 Access 后面）访问。
 - 仓库里不出现任何 token；wrangler 登录用 `wrangler login`（浏览器授权），不落地 API key。
