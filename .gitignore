@@ -30,4 +30,5 @@ evals/private/
 
 # 与 personal-brain 仓库无关的本地目录（不提交、不参与镜像构建）
 /campus-ats-demo/
-/integrations/
+/integrations/*
+!/integrations/agent_sync/
