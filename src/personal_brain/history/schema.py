@@ -290,6 +290,36 @@ MIGRATIONS: list[tuple[int, str]] = [
             ON revision_chunks(revision_id);
         """,
     ),
+    (
+        6,
+        """
+        -- D-5b：覆盖期查询（MIN/MAX(source_created_at) + policy EXISTS）首算提速。
+        --
+        -- 实测（EXPLAIN QUERY PLAN + 合成 1 万 revision 库计时）：outer 扫描
+        -- 恒为 `SCAN r`（event_revisions 本身没有可用来剪枝的等值/范围前缀——
+        -- source_created_at IS NOT NULL 选择性太低），migration 2 的
+        -- ix_revisions_created(source_created_at) 单列索引和一度尝试的
+        -- (source_created_at, revision_id) 复合索引都**不会被走到**，加了也是
+        -- 死重量（仅拖慢写入），故不建它。
+        --
+        -- 真正的重复成本在每行的两个相关子查询：
+        --   EXISTS(... revision_policy_state ps  WHERE revision_id=? AND
+        --          valid_to IS NULL AND availability=?)
+        --   EXISTS(... revision_policy_state ps2 WHERE revision_id=? AND
+        --          valid_to IS NULL AND classification_status!=?)
+        -- 旧索引 ix_policy_state_current(revision_id, valid_to) 只覆盖等值列，
+        -- availability/classification_status 不在索引里 → 每行都要多一次回表
+        -- （EXPLAIN 显示 `SEARCH ps EXISTS USING INDEX`，无 COVERING）。
+        -- 加 availability + classification_status 后变成
+        -- `USING COVERING INDEX`，两个子查询都不再回表。
+        -- 查询语义不变；本地合成库测不出差（数据全在页缓存里），VM 慢盘上
+        -- 每行省一次回表 I/O 应该更明显——具体数字见交付里的 VM 实测。
+        CREATE INDEX IF NOT EXISTS ix_policy_state_current_cover
+            ON revision_policy_state(
+                revision_id, valid_to, availability, classification_status
+            );
+        """,
+    ),
 ]
 
 

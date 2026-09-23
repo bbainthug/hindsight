@@ -123,6 +123,83 @@ curl -s http://127.0.0.1:8765/api/status
 open "http://127.0.0.1:8765/mcp/$BRAIN_MCP_TOKEN"   # 仅用于确认路径存在，浏览器直接打开不是合法 MCP 请求
 ```
 
+## 性能（D-5b：覆盖期缓存）
+
+背景：VM（2 核 / 1 GB）上 `/api/search` 空载约 9 秒，导入进行中 11–16 秒，
+定位在 `mcp_server/service.py::_coverage()`——每次工具调用都对全库做一次
+`MIN/MAX(source_created_at)` 聚合（带 policy_state/标签的 EXISTS 子查询）。
+`tool_brain_status`、`tool_search_history`、`tool_get_recent_events`、
+`tool_get_event` 四处都调用它，一次 claude.ai/ChatGPT 回答常连调 3–4 次工具，
+按原速度会超时。
+
+**改动**：给 `_coverage()` 加进程内 LRU 缓存（上限 32），键为
+`(filters 规范化签名, branch_scope, policy_epoch, import_watermark)`：
+
+- `policy_epoch`：撤回/标注同事务递增，缓存立即失效（不等 TTL）；
+- `import_watermark`：`import_jobs` 表的 `MAX(rowid)`。这张表的写入与本次
+  导入的事件在**同一事务**里提交（`history/store.py::publish_snapshot`），
+  跟"这批事件对其他连接可见"是同一个提交点，任何连接读到的都是同一提交
+  历史下的同一个值——**跨连接可比**。最初实现用的是 `PRAGMA data_version`，
+  但它只保证同一连接内"值变化 ⇒ 库被别的连接改过"，不保证跨连接可比：
+  REST 连接池会新开连接，新连接的 `data_version` 起始值可能和旧连接缓存过
+  的某个值撞上，读到导入前的旧缓存（已用回归测试覆盖：见
+  `tests/integration/test_coverage_cache_integration.py::
+  test_new_connection_sees_import_from_other_connection`）。
+
+**首算索引**（migration 6）：用 `EXPLAIN QUERY PLAN` 核实后发现，
+`event_revisions` 本身没有可剪枝的等值/范围前缀（`source_created_at IS NOT
+NULL` 选择性太低），outer 扫描恒为 `SCAN r`，给它加索引（无论单列还是复合列）
+都不会被走到，是死重量——最初加的
+`(source_created_at, revision_id)` 索引就是这种情况，已改正。真正被重复
+求值的是每行的两个相关子查询（`EXISTS ... revision_policy_state ps
+WHERE availability=?` / `... classification_status!=?`），旧索引
+`ix_policy_state_current(revision_id, valid_to)` 不覆盖这两列，每行都要多一次
+回表；migration 6 改成给 `revision_policy_state` 加
+`(revision_id, valid_to, availability, classification_status)` 覆盖索引后，
+`EXPLAIN QUERY PLAN` 确认这两个子查询从 `SEARCH ... USING INDEX` 变成
+`SEARCH ... USING COVERING INDEX`（不再回表）。本地合成库（1 万 revision，
+数据全在页缓存里）测不出差异，VM 慢盘下每行省一次回表 I/O 应该更明显——
+下面"VM 实测"待补真实数字。
+
+**`/api/search` 分段（本地合成库 1 万 events、命中缓存后的热态，仅供参考，
+不代表 VM 磁盘 I/O 特征）**：
+
+| 段 | 占比（cProfile cumtime，200 次调用） |
+| --- | --- |
+| FTS 候选行获取（`_fetch_fts_rows`，含 SQL 里内嵌的授权 WHERE） | ~74% |
+| 逐候选授权验证（`_verify`） | ~11% |
+| 排序（`_sort_hits`） | ~7% |
+| snippet 渲染（`_snippet_window`/`_render_snippet`） | ~3% |
+| 序列化（`_hit_to_result`/`_occurrence_ref`） | <1% |
+| 覆盖期（`_coverage`，缓存命中） | <1% |
+
+说明："授权"不是独立阶段——过滤条件内嵌在 FTS 候选查询的 SQL WHERE 里，
+和取候选行是同一次 `execute`。另外发现 `revision_occurrences` 在
+`search_history()` 富化阶段和 `_hit_to_result`/`_occurrence_ref` 各查了一次
+（同一 revision 两次），量级很小（本地 <1%），按任务书"只报告，不顺手优化"
+未动，记录在这里供后续参考。本地整体热态 P50 ≈ 11ms（200 次调用，10k
+events 合成库），没有任何一段单独超过 1 秒，因此没有触发"单段超 1s 才优化"
+的条件。
+
+**VM 实测（待补）**：复现命令见下，结果由用户在 VM 上跑出后回填本节。
+
+```bash
+# 重启服务以应用新代码（migration 6 会在启动时自动跑）：
+systemctl --user restart hindsight-mcp
+
+# 空载：REST /api/search 与 MCP tools/call search_history 的 P50/P95（各 30 次，可调 --repeats）
+./deploy/vm/perf_probe.py --label 空载 --repeats 30
+
+# 导入进行中：另开一个终端触发一轮导入，同时跑探针
+systemctl --user start hindsight-import.service   # 或等 hindsight-import.timer 自然触发
+./deploy/vm/perf_probe.py --label 导入进行中 --repeats 30
+
+# _coverage 首算耗时 + soak 漂移/RSS/完整性门槛（合成库，不碰生产库）：
+uv run brain soak --mode both
+```
+
+目标（任务书 D-5b）：热态 P95 ≤ 1.5s（空载）/ ≤ 3s（导入进行中）。
+
 ## 已知问题
 
 - 本仓库当前锁定的 `mcp>=2.1.1` 把 `starlette`（连同 `pyjwt[crypto]`）声明为

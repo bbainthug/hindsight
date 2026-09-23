@@ -201,7 +201,11 @@ def _writer_main(
 
 
 def _worker_main(cfg: WorkerConfig, stop_event: Any, out_queue: Any) -> None:
-    """worker 主循环：自开 ro 连接，随机抽查询循环执行，经 Queue 上报。
+    """worker 主循环：自开 ro 连接，轮询查询池循环执行，经 Queue 上报。
+
+    计样本主循环轮询（非随机）取查询：见下方 D-5b 注释，随机抽取在查询延迟
+    降到亚 ms 级后会让 _drift_analysis 的头/尾切片撞上查询构成不均，产生
+    与真实退化无关的比值震荡。预热阶段仍用 rng（不计样本，无影响）。
 
     上报协议（同一 Queue）：
     - ``{"type": "rss", "worker_id", "t_s", "rss_mb"}``：每 rss_interval_s 一次；
@@ -252,7 +256,17 @@ def _worker_main(cfg: WorkerConfig, stop_event: Any, out_queue: Any) -> None:
                 bq = queries[rng.randrange(len(queries))]
                 _run_one(impls, bq, cfg.sample_event_id)
 
-            # 计入样本的主循环
+            # 计入样本的主循环：轮询取查询（不用 rng.randrange）——D-5b 给
+            # _coverage 加缓存后，单条查询延迟从 ms 级降到亚 ms 级，此时
+            # 9 种查询固有成本的差异（get_event ~0.03ms vs 短词回退扫描
+            # ~2.7ms，约 90 倍）反而成了主导因素。_drift_analysis 按完成
+            # 顺序切前/后 10%（n=10~20）：若用随机抽取，固定 seed 下某一次
+            # 抽样序列可能恰好把更多"贵"查询排到尾部（或头部），比值随
+            # total_queries/duration 大幅震荡（实测 0.03~55，非单调），
+            # 与真实退化无关，纯属抽样噪声。轮询保证任意 ≥9 个样本的窗口
+            # 都含各查询各一次，头尾两侧查询构成一致，比值只反映真实耗时
+            # 变化。经验证：小语料测试在此改动后跨 5 次重复运行比值
+            # 0.02~0.37，稳定 < 1.3 门槛。
             while True:
                 if cfg.quota is not None and done >= cfg.quota:
                     break
@@ -260,7 +274,7 @@ def _worker_main(cfg: WorkerConfig, stop_event: Any, out_queue: Any) -> None:
                     break
                 if cfg.deadline is not None and time.monotonic() >= cfg.deadline:
                     break
-                bq = queries[rng.randrange(len(queries))]
+                bq = queries[done % len(queries)]
                 t_ms = round((time.monotonic() - started) * 1000, 3)
                 lat_ms, err = _run_one(impls, bq, cfg.sample_event_id)
                 done += 1

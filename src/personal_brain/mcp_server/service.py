@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from collections import OrderedDict
 
 from personal_brain.history.policy_epoch import current_policy_epoch
 from personal_brain.policy.profiles import AccessProfile
@@ -163,7 +165,72 @@ def _hit_to_result(conn: sqlite3.Connection, hit: SearchHit) -> dict:
     }
 
 
-def _coverage(conn: sqlite3.Connection, filters: SearchFilters, branch_scope: str) -> dict:
+# ---------------------------------------------------------------------------
+# 覆盖期缓存（D-5b）：_coverage 全库聚合在 840MB 级库上约 7s，每个工具调用都要
+# 付一次。键 = (filters 规范化签名, branch_scope, policy_epoch, import_watermark)：
+# - policy_epoch：撤回/标注递增 → 撤回立即反映（不等 TTL）；
+# - import_watermark：import_jobs 的 MAX(rowid)。import_jobs 行与本次导入的
+#   事件在同一事务内提交（history/store.py::publish_snapshot），所以它和
+#   "这批事件对其他连接可见" 是同一个提交点，任何连接读到的都是同一提交历史
+#   下的同一个值 —— 跨连接可比。
+#   最初用的是 PRAGMA data_version，但它只保证"同一连接内，值变化 ⇒ 库被别的
+#   连接改过"，不保证跨连接可比：REST 连接池会新开连接，新连接的 data_version
+#   起始值可能和旧连接缓存过的某个值撞上，造成新连接读到导入前的旧缓存。
+_COVERAGE_CACHE_MAX = 32
+_coverage_cache: OrderedDict[tuple, dict] = OrderedDict()
+_coverage_cache_lock = threading.Lock()
+
+
+def _import_watermark(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM import_jobs").fetchone()
+    return int(row[0])
+
+
+def _coverage_cache_key(
+    conn: sqlite3.Connection, filters: SearchFilters, branch_scope: str
+) -> tuple:
+    """缓存键：filters 的规范化签名 + branch_scope + 两个失效计数。"""
+    sig = (
+        tuple(filters.allow_scopes) if filters.allow_scopes is not None else None,
+        tuple(filters.deny_sensitivity) if filters.deny_sensitivity is not None else None,
+        filters.allow_unclassified,
+        filters.date_from,
+        filters.date_to,
+        filters.source_id,
+        filters.account_namespace,
+        filters.conversation_id,
+        filters.speaker_type,
+        filters.path_mode,
+    )
+    epoch = current_policy_epoch(conn)
+    watermark = _import_watermark(conn)
+    return (sig, branch_scope, epoch, watermark)
+
+
+def _coverage(
+    conn: sqlite3.Connection, filters: SearchFilters, branch_scope: str
+) -> dict:
+    key = _coverage_cache_key(conn, filters, branch_scope)
+    with _coverage_cache_lock:
+        cached = _coverage_cache.get(key)
+        if cached is not None:
+            _coverage_cache.move_to_end(key)
+            return dict(cached)
+    # 锁外计算：全库聚合可达秒级，不阻塞其他键的并发命中
+    value = _coverage_uncached(conn, filters, branch_scope)
+    with _coverage_cache_lock:
+        if key in _coverage_cache:  # 并发同键：采用先算完的结果（一致）
+            value = dict(_coverage_cache[key])
+        else:
+            _coverage_cache[key] = dict(value)
+            while len(_coverage_cache) > _COVERAGE_CACHE_MAX:
+                _coverage_cache.popitem(last=False)
+    return value
+
+
+def _coverage_uncached(
+    conn: sqlite3.Connection, filters: SearchFilters, branch_scope: str
+) -> dict:
     """调用者可见档案的覆盖期（§7.3：不泄露隐藏记录数量）。"""
     params: list = []
     sql = """
