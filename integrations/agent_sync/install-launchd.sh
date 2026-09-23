@@ -9,6 +9,15 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BRAIN_HOME="${BRAIN_HOME:-$HOME/.local/share/personal-brain}"
 BRAIN_CLI="${BRAIN_CLI:-$(command -v brain || true)}"
+# 脚本用了 3.11+ 语法（datetime.UTC）；macOS 自带的 /usr/bin/python3 是 3.9，不能用。
+PYTHON="${PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
+  for cand in python3.14 python3.13 python3.12 python3.11 python3; do
+    p="$(command -v "$cand" || true)"
+    [[ -n "$p" ]] && "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null && PYTHON="$p" && break
+  done
+fi
+[[ -n "$PYTHON" ]] || { echo "找不到 Python ≥ 3.11（用 PYTHON=/path/to/python3 指定）" >&2; exit 1; }
 VM_HOST=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,7 +34,7 @@ cp "$HERE/sync_agents.py" "$BRAIN_HOME/agent_sync/"
 cp "$HERE/../../deploy/vm/push_to_vm.py" "$BRAIN_HOME/agent_sync/" 2>/dev/null || true
 
 render() {  # $1=模板 $2=目标
-  sed -e "s#__BRAIN_HOME__#$BRAIN_HOME#g" -e "s#__BRAIN_CLI__#$BRAIN_CLI#g" -e "s#__VM_HOST__#$VM_HOST#g" "$1" > "$2"
+  sed -e "s#__BRAIN_HOME__#$BRAIN_HOME#g" -e "s#__BRAIN_CLI__#$BRAIN_CLI#g" -e "s#__VM_HOST__#$VM_HOST#g" -e "s#__PYTHON__#$PYTHON#g" "$1" > "$2"
 }
 load() {  # $1=label
   launchctl unload "$HOME/Library/LaunchAgents/$1.plist" 2>/dev/null || true
@@ -38,4 +47,5 @@ if [[ -n "$VM_HOST" ]]; then
   render "$HERE/launchd/local.hindsight.vm-push.plist.tmpl" "$HOME/Library/LaunchAgents/local.hindsight.vm-push.plist"
   load local.hindsight.vm-push
 fi
+echo "解释器：$PYTHON"
 echo "日志：$BRAIN_HOME/agent_sync/sync.log（采集）$([[ -n "$VM_HOST" ]] && echo "、vm_push.log（推送）")"
