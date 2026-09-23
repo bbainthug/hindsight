@@ -11,7 +11,11 @@ Cloudflare Tunnel + Access 承担 TLS 与身份，服务进程自己只绑 `127.
 | `install.sh` | VM 上以当前用户安装 systemd --user 服务（非 root） |
 | `hindsight-mcp.service` | systemd --user unit（`install.sh` 会复制到 `~/.config/systemd/user/`） |
 | `cloudflared.example.yml` | cloudflared ingress 配置示例（占位符域名/token） |
-| `sync-db.sh` | Mac 侧：一致性快照 → rsync → 原子替换 → 重启远端服务 |
+| `import_inbox.sh` | VM 侧：就地导入 inbox 批次（D-5，由 timer 每 10 分钟驱动） |
+| `hindsight-import.service` / `.timer` | 批次导入的 systemd user 单元（每 10 分钟，`MemoryMax=400M`） |
+| `push_batches.py` | Mac 侧：把 outbox 批次 rsync 到 VM inbox（D-5 常规同步） |
+| `reset_vm_db.py` | Mac 侧：**手动整库重置工具**（原 `push_to_vm.py`，见"何时用整库重置"） |
+| `sync-db.sh` | Mac 侧：旧的手动快照推送脚本（等价 shell 版） |
 
 ## 前提
 
@@ -75,22 +79,67 @@ cloudflared tunnel run hindsight-mcp
   （`<token>` 来自 `~/.config/hindsight/env` 的 `BRAIN_MCP_TOKEN`）。
 - 浏览器打开 `https://brain.<your-domain>/`：走 Access 邮箱 OTP 登录后看到查询页。
 
-### 5. 库同步（Mac → VM）
+### 5. 批次同步与定时导入（D-5，常规路径）
+
+Mac 侧 launchd（`install-launchd.sh --vm-host hindsight-vm`）每 15 分钟做两件事：
+`sync_agents.py --export-dir …/outbox` 导出新增会话批次（`<UTC时间戳>-<内容
+sha256前12位>.json`，原子写、导出断点与导入断点独立），`push_batches.py` 把
+未推送批次 rsync 到 `~/brain-data/inbox/<source>/`（走 Cloudflare 隧道 SSH，
+失败不删下次重试，成功移 outbox/sent/ 保留 14 天）。**只传批次，永不传库。**
+
+VM 侧启用定时导入（systemd --user，非 root）：
 
 ```bash
-./deploy/vm/sync-db.sh ~/brain-data/brain.sqlite hindsight-vm brain-data/brain.sqlite
+cp ~/hindsight/deploy/vm/hindsight-import.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now hindsight-import.timer
 ```
 
-可接到现有每日备份 launchd job 之后（例如在 `backup()` 成功后调用本脚本）。
-只做单向 push，VM 上的库是 Mac 的快照副本，不做双向同步。
+导入脚本 `import_inbox.sh` 按文件名顺序单批次顺序导入（`flock` 防重叠，
+`MemoryMax=400M`，与 `hindsight-mcp` 读服务并存、WAL 下互不阻塞、不重启服务）；
+成功移 `inbox/done/<source>/`，失败移 `inbox/failed/` 并记日志、不阻塞后续批次。
+导入后如语义索引已存在则增量 reindex（`HINDSIGHT_SEMANTIC_REINDEX=0` 关闭）。
+
+**首次追平**：VM 库落后很多时，Mac 用空的导出断点跑一次全量导出再推送即可，
+VM 导入器按消息 ID 幂等去重，不需要传整库。追平批次体积 ≈ 全部会话 JSON
+总量（实测约 100 MB，一次性）；常规轮转每批几十 KB～几 MB。追平后把追平导出
+断点复制回默认 `export_state.json`，避免 launchd 重复全量导出。
+
+ChatGPT 官方导出（`main` 来源）仍在 Mac 手动导入；需要同步到 VM 时，把导出
+zip 手动放进 VM 的 `~/brain-data/inbox/main/`（zip 同样按导入器幂等去重）。
+
+### 6. 何时用整库重置（手动）
+
+批次同步**不含撤回 / 标注**（它们只在 Mac 库生效，见"已知限制"）。以下两种
+情况用 `reset_vm_db.py`（原 `push_to_vm.py`，走 Tailscale 私网，勿走隧道）：
+
+1. VM 库损坏 / 数据漂移，需要从 Mac 库完全重置；
+2. 需要把撤回 / 标注同步到 VM。
+
+```bash
+./deploy/vm/reset_vm_db.py            # 或带 --host / --remote / --force
+```
+
+## 已知限制
+
+- **撤回 / 标注不跨端**：只在 Mac 库生效；VM 检索仍可见已撤回内容。需要一致时
+  用整库重置（上节）。
+- **单向**：VM 不回写 Mac；VM 上除导入批次外不产生新数据。
 
 ## 运维
 
 ```bash
-systemctl --user status hindsight-mcp    # 状态
-journalctl --user -u hindsight-mcp -f    # 日志（不含 query 内容/正文，见 docs/remote-access.md）
+systemctl --user status hindsight-mcp    # 读服务状态
+systemctl --user status hindsight-import # 批次导入状态（timer 驱动）
+journalctl --user -u hindsight-mcp -f    # 读服务日志（不含 query 内容/正文）
+journalctl --user -u hindsight-import    # 导入日志（只记批次名/事件数/耗时）
+systemctl --user start hindsight-import.service   # 手动触发一轮导入（等 timer 也可以）
 systemctl --user restart hindsight-mcp   # 重启（换库/轮换 token 后）
 ```
+
+导入失败排查：`inbox/failed/<source>/` 里的批次是按文件名序导入时被导入器拒绝的
+（坏 JSON、超限等）；修复内容后可改好放回 `inbox/<source>/` 重导，或确认无用直接删。
+`inbox/done/` 与 `outbox/sent/`（Mac 侧）可按需清理，保留期外由脚本自动清理。
 
 轮换 `BRAIN_MCP_TOKEN`：编辑 `~/.config/hindsight/env`，写入新 token，
 `systemctl --user restart hindsight-mcp`，旧的能力 URL 立即失效。

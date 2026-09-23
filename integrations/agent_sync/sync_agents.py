@@ -9,8 +9,15 @@ import-chatgpt` 导入器——幂等、按消息 ID 去重，项目源码零改
 用法：
   sync_agents.py [--db PATH] [--archive-dir DIR] [--state FILE]
                  [--brain CMD] [--sources codex,dsh,claude,hermes]
+                 [--export-dir DIR] [--export-state FILE] [--no-import]
 环境变量（优先级低于参数）：BRAIN_HOME、BRAIN_CLI、ZSTD
 默认：BRAIN_HOME=~/.local/share/personal-brain，brain 命令从 PATH 找。
+
+D-5 批次导出：--export-dir 给定时，把每个来源本轮转写的会话额外写成批次文件
+``DIR/<source>/<UTC时间戳>-<内容sha256前12位>.json``（原子写），供
+deploy/vm/push_batches.py 推到 VM 就地导入。导出断点（--export-state，默认
+$BRAIN_HOME/agent_sync/export_state.json）与本地导入断点（--state）互不影响；
+``--no-import`` 跳过本地导入、只产出批次。
 定时运行：见同目录 launchd/ 与 docs/agent-sync.md。
 """
 from __future__ import annotations
@@ -33,6 +40,8 @@ BRAIN_CLI = (
 )
 ZSTD = os.environ.get("ZSTD") or shutil.which("zstd") or "zstd"
 STATE_FILE = BRAIN_HOME / "agent_sync/state.json"
+EXPORT_STATE_FILE = BRAIN_HOME / "agent_sync/export_state.json"
+EXPORT_DIR = BRAIN_HOME / "agent_sync/outbox"
 ARCHIVE_DIR = BRAIN_HOME / "archives"
 
 
@@ -238,52 +247,136 @@ SOURCES = {
 ALL_SOURCES = list(SOURCES)
 
 
+def batch_filename(payload_text: str, now: datetime | None = None) -> str:
+    """批次文件名：<UTC时间戳>-<内容sha256前12位>.json。
+
+    时间戳保证按名排序即按产出时间；哈希保证同内容得到同名——
+    推送端按文件名去重，VM 端导入器按内容幂等。
+    """
+    ts = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+    digest = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()[:12]
+    return f"{ts}-{digest}.json"
+
+
+def write_batch(export_dir: Path, source: str, payload_text: str) -> Path:
+    """原子写批次文件：先写 .tmp 再 rename 到目标名。
+
+    同源目录已有相同内容哈希段的批次（如导出断点重置后的重复导出）直接复用，
+    保证"同一内容只对应一个批次文件"。
+    """
+    dest_dir = export_dir / source
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()[:12]
+    existing = sorted(dest_dir.glob(f"*-{digest}.json"))
+    if existing:
+        return existing[-1]
+    dest = dest_dir / batch_filename(payload_text)
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_text(payload_text, encoding="utf-8")
+    tmp.replace(dest)
+    return dest
+
+
+def load_state(path: Path) -> dict:
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def write_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=0), encoding="utf-8")
+
+
 def main() -> int:
     args = sys.argv[1:]
 
     def opt(name: str, default):
         return args[args.index(name) + 1] if name in args else default
 
+    def has(name: str) -> bool:
+        return name in args
+
     db = Path(opt("--db", BRAIN_HOME / "db/brain.sqlite")).expanduser()
     archive_dir = Path(opt("--archive-dir", ARCHIVE_DIR)).expanduser()
     state_file = Path(opt("--state", STATE_FILE)).expanduser()
+    no_import = has("--no-import")
+    # --export-dir DIR 显式给值；裸 --export-dir 用默认 outbox
+    export_dir = None
+    if "--export-dir" in args:
+        idx = args.index("--export-dir")
+        export_dir = (
+            Path(args[idx + 1]).expanduser()
+            if idx + 1 < len(args) and not args[idx + 1].startswith("--")
+            else EXPORT_DIR
+        )
+    export_state_file = (
+        Path(opt("--export-state", EXPORT_STATE_FILE)).expanduser()
+        if export_dir is not None
+        else None
+    )
     brain_cli = opt("--brain", BRAIN_CLI)
     want = [s for s in opt("--sources", ",".join(ALL_SOURCES)).split(",") if s]
     unknown = [s for s in want if s not in SOURCES]
     if unknown:
         print(f"未知来源: {unknown}（可选 {ALL_SOURCES}）", file=sys.stderr)
         return 2
-    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    if no_import and export_dir is None:
+        print("--no-import 需要搭配 --export-dir（否则无事可做）", file=sys.stderr)
+        return 2
+    import_state = load_state(state_file)
+    export_state = load_state(export_state_file) if export_state_file else None
 
     total_new = 0
+    total_batches = 0
     for src in want:
         base, pattern, parser = SOURCES[src]
         convs: list[dict] = []
         files = scan(pattern, base)
         changed = 0
+        changed_export = 0
         for f in files:
             st = f.stat()
             key = str(f)
-            prev = state.get(key)
-            if prev and prev["mtime"] == st.st_mtime and prev["size"] == st.st_size:
+            rec = {"mtime": st.st_mtime, "size": st.st_size}
+            seen_import = import_state.get(key)
+            fresh_import = not (seen_import and seen_import["mtime"] == st.st_mtime
+                                and seen_import["size"] == st.st_size)
+            prev_export = export_state.get(key) if export_state is not None else seen_import
+            fresh_export = not (prev_export and prev_export["mtime"] == st.st_mtime
+                                and prev_export["size"] == st.st_size)
+            if not fresh_import and not fresh_export:
                 continue
             try:
                 c = parser(f)
             except Exception as exc:  # 单文件坏不拖垮整体
                 print(f"  [跳过] {f.name}: {exc}", file=sys.stderr)
                 continue
-            state[key] = {"mtime": st.st_mtime, "size": st.st_size}
+            if fresh_import:
+                import_state[key] = rec
+                changed += 1
+            if fresh_export and export_state is not None:
+                export_state[key] = rec
+                changed_export += 1
             if isinstance(c, list):
                 convs.extend(x for x in c if x)
             elif c:
                 convs.append(c)
-            changed += 1
         if not convs:
             print(f"[{src}] 无新增会话（扫描 {len(files)} 个文件）")
             continue
+        payload = json.dumps(convs, ensure_ascii=False)
+        if export_dir is not None:
+            batch = write_batch(export_dir, src, payload)
+            total_batches += 1
+            print(
+                f"[{src}] 导出批次 {batch.name}（{len(convs)} 个对话，"
+                f"{len(payload.encode('utf-8'))} 字节）"
+            )
+        if no_import:
+            print(f"[{src}] 转写 {changed_export} 个新/变化会话（本地导入已跳过）")
+            continue
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "conversations.json"
-            out.write_text(json.dumps(convs, ensure_ascii=False), encoding="utf-8")
+            out.write_text(payload, encoding="utf-8")
             r = subprocess.run(
                 [brain_cli, "--db", str(db), "--archive-dir", str(archive_dir),
                  "import-chatgpt", str(out.parent), "--source", src],
@@ -294,9 +387,14 @@ def main() -> int:
             tail = (r.stdout or "").strip().splitlines()[-1] if (r.stdout or "").strip() else ""
             print(f"[{src}] 转写 {changed} 个新/变化会话，导入 {len(convs)} 个对话。{tail}")
             total_new += len(convs)
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=0))
-    print(f"完成：本轮新导入 {total_new} 个对话。")
+    if not no_import:  # --no-import 不得推进导入断点（文件尚未真正导入）
+        write_state(state_file, import_state)
+    if export_state is not None and export_state_file is not None:
+        write_state(export_state_file, export_state)
+    if export_dir is not None:
+        print(f"完成：本轮新导入 {total_new} 个对话，产出 {total_batches} 个批次。")
+    else:
+        print(f"完成：本轮新导入 {total_new} 个对话。")
     return 0
 
 

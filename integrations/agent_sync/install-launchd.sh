@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 把 agent_sync 装成 macOS launchd 定时任务（每 15 分钟采集；可选每 30 分钟推到 VM）。
+# 把 agent_sync 装成 macOS launchd 定时任务（每 15 分钟采集 + 导出批次；给了
+# --vm-host 再装每 15 分钟推批次到 VM 的任务）。
 # 脚本会被复制到 $BRAIN_HOME/agent_sync/ —— launchd 无权读 ~/Documents 等受 TCC 保护的目录，
 # 所以私有数据根和脚本都放在 ~/.local/share 下。
 #
@@ -31,7 +32,10 @@ done
 
 mkdir -p "$BRAIN_HOME/agent_sync" "$HOME/Library/LaunchAgents"
 cp "$HERE/sync_agents.py" "$BRAIN_HOME/agent_sync/"
-cp "$HERE/../../deploy/vm/push_to_vm.py" "$BRAIN_HOME/agent_sync/" 2>/dev/null || true
+cp "$HERE/../../deploy/vm/push_batches.py" "$BRAIN_HOME/agent_sync/"
+# D-5：push_to_vm.py 已改名 reset_vm_db.py（手动整库重置工具），不再复制到
+# agent_sync/；清掉旧安装残留的复制件，避免误跑整库推送。
+rm -f "$BRAIN_HOME/agent_sync/push_to_vm.py"
 
 render() {  # $1=模板 $2=目标
   sed -e "s#__BRAIN_HOME__#$BRAIN_HOME#g" -e "s#__BRAIN_CLI__#$BRAIN_CLI#g" -e "s#__VM_HOST__#$VM_HOST#g" -e "s#__PYTHON__#$PYTHON#g" "$1" > "$2"

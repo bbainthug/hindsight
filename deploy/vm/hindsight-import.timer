@@ -1,0 +1,10 @@
+[Unit]
+Description=Hindsight inbox batch import timer (every 10 minutes)
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+Unit=hindsight-import.service
+
+[Install]
+WantedBy=timers.target

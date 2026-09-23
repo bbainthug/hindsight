@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""把本地 brain.sqlite 的一致性快照推到 VM（单向），原子替换后重启远端服务。
+"""【手动整库重置工具】把本地 brain.sqlite 的一致性快照推到 VM 并原子替换。
+
+D-5 之后常规同步不再走这条路：日常只推 KB 级会话批次（sync_agents.py
+--export-dir → deploy/vm/push_batches.py → VM import_inbox.sh）。本工具只在
+两种情况下手动使用：
+  1. VM 库损坏 / 数据漂移，需要从 Mac 库完全重置；
+  2. 需要把撤回 / 标注同步过去（批次同步不跨端同步这些操作，见任务书
+     "已知取舍"）。
+大文件传输，务必走 Tailscale 等私网直连，不要走 Cloudflare 隧道。
 
 - 用 Python backup API 出快照（macOS 的 sqlite3 CLI 常因 TCC 打不开库），不 VACUUM，
   保持页布局稳定，rsync 才能只传变化块；
 - 远端保留常驻 .staging 文件作为 rsync 基准，再 cp+mv 原子替换；
 - 库没变化（mtime/size/WAL）就跳过。
-- 不要让这条路走 Cloudflare 隧道：800 MB 级传输会把隧道和 1 GB 内存的小机器堵死，
-  用 Tailscale 之类的私网直连。
 
-用法：push_to_vm.py [--host SSH别名] [--remote 远端路径] [--force]
+用法：reset_vm_db.py [--host SSH别名] [--remote 远端路径] [--force]
 """
 from __future__ import annotations
 

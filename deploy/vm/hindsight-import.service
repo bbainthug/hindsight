@@ -1,0 +1,18 @@
+[Unit]
+Description=Hindsight inbox batch import (D-5: import agent-sync batches from Mac)
+# 与 hindsight-mcp 读服务并存：库为 WAL 模式，导入期间读不阻塞，不需要排序约束。
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/hindsight/deploy/vm/import_inbox.sh
+# 1 GB 内存机器：导入按单批次顺序跑，限内存防失控（读服务是 600M）。
+MemoryMax=400M
+NoNewPrivileges=true
+PrivateTmp=true
+# 导入日志只记批次名/事件数/耗时（脚本保证不输出会话正文）。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

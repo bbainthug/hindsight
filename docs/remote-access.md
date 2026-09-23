@@ -99,13 +99,18 @@ https://brain.<your-domain>/
   首选的升级路径。
 - **单进程单端口**：MCP + REST + 静态页面共享同一个 uvicorn 进程，是为
   1 GB 内存的 VM 省资源；不要拆成两个服务（会翻倍内存开销）。
-- **VM 上的库是 Mac 的单向快照副本**：`sync-db.sh` 只做 Mac → VM 的 push，
-  VM 上不产生任何新数据，也不回传。
+- **VM 库由批次同步驱动（D-5）**：Mac 每 15 分钟导出新增会话批次并 rsync 到
+  VM inbox（`push_batches.py`，走 Cloudflare 隧道 SSH），VM 每 10 分钟由
+  `hindsight-import.timer` 就地导入（`import_inbox.sh`，flock 防重叠、
+  单批次顺序、与读服务并存不重启）。只传批次（常规几十 KB～几 MB），永不传库；
+  VM 上不产生新会话数据，也不回传。整库快照（`reset_vm_db.py`，原
+  `push_to_vm.py` / `sync-db.sh`）仅作手动重置手段——VM 库损坏或需要带上
+  撤回/标注时使用。
 
 ## 部署
 
 见 [`deploy/vm/README.md`](../deploy/vm/README.md)（`install.sh` 一条命令起
-服务 + cloudflared 配置步骤 + Access 策略配置 + `sync-db.sh` 库同步）。
+服务 + cloudflared 配置步骤 + Access 策略配置 + 批次同步/定时导入 + 手动整库重置）。
 
 ## 快速开始（本地跑 HTTP transport，不经过 Cloudflare）
 
