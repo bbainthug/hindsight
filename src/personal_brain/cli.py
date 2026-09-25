@@ -130,7 +130,10 @@ def cmd_import(args, cfg: BrainConfig, as_json: bool) -> int:
     try:
         importer = ChatGPTImporter(conn, cfg.archive_dir)
         result = importer.import_archive(Path(args.path), args.source)
-        payload = {"kind": "import", "result": asdict(result)}
+        result_dict = asdict(result)
+        # errors 是 pydantic 模型，asdict 不会展开它；转成普通 dict 才能打印 / 序列化
+        result_dict["errors"] = [e.model_dump() for e in result.errors]
+        payload = {"kind": "import", "result": result_dict}
         _emit(payload, as_json)
         return 0
     finally:
