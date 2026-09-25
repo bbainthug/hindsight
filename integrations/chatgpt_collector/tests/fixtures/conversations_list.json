@@ -1,0 +1,32 @@
+{
+  "object": "list",
+  "items": [
+    {
+      "id": "conv-aaa-1",
+      "title": "deploy 相关讨论",
+      "update_time": 1758010000,
+      "create_time": 1758000000,
+      "is_temporary": false
+    },
+    {
+      "id": "conv-bbb-2",
+      "title": "临时聊天",
+      "update_time": 1758009000,
+      "create_time": 1758008000,
+      "is_temporary": true
+    },
+    {
+      "id": "conv-ccc-3",
+      "title": "older conversation",
+      "update_time": 1757000000,
+      "create_time": 1756900000
+    },
+    {
+      "id": "conv-ddd-4",
+      "title": "excluded one",
+      "update_time": 1758009500,
+      "create_time": 1758000000
+    }
+  ],
+  "total": 4
+}

@@ -35,14 +35,38 @@ mkdir -p "$ENV_DIR"
 chmod 700 "$ENV_DIR"
 
 if [[ -f "$ENV_FILE" ]]; then
-  echo "==> $ENV_FILE 已存在，保留现有 BRAIN_MCP_TOKEN（不覆盖）。"
+  echo "==> $ENV_FILE 已存在，保留现有 BRAIN_MCP_TOKEN / BRAIN_INGEST_TOKEN（不覆盖）。"
 else
   echo "==> 生成 BRAIN_MCP_TOKEN 并写入 $ENV_FILE（600 权限，不进 git）"
   TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  INGEST_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   umask 077
-  printf 'BRAIN_MCP_TOKEN=%s\n' "$TOKEN" > "$ENV_FILE"
+  printf 'BRAIN_MCP_TOKEN=%s\nBRAIN_INGEST_TOKEN=%s\n' "$TOKEN" "$INGEST_TOKEN" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "已生成 token（不打印到终端历史以外的地方）。查看：cat $ENV_FILE"
+fi
+
+# D-6：已有 env 文件但缺 BRAIN_INGEST_TOKEN 时补上（不覆盖已有值）。
+if ! grep -q '^BRAIN_INGEST_TOKEN=' "$ENV_FILE" 2>/dev/null; then
+  echo "==> 补充生成 BRAIN_INGEST_TOKEN（/ingest 写入 token，独立于 MCP token）"
+  INGEST_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  umask 077
+  printf 'BRAIN_INGEST_TOKEN=%s\n' "$INGEST_TOKEN" >> "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+fi
+
+# D-6：/ingest 需要 remote.yaml 里有 ingest.inbox（目录不存在则创建）。
+INGEST_INBOX="$(python3 - "$CONFIG_PATH" <<'PYEOF'
+import sys, yaml
+raw = yaml.safe_load(open(sys.argv[1])) or {}
+ing = raw.get("ingest") or {}
+print(ing.get("inbox", ""))
+PYEOF
+)"
+if [[ -n "$INGEST_INBOX" ]]; then
+  INGEST_INBOX="${INGEST_INBOX/#\~/$HOME}"
+  mkdir -p "$INGEST_INBOX/main"
+  echo "==> /ingest inbox 就绪：$INGEST_INBOX/main"
 fi
 
 mkdir -p "$UNIT_DIR"
@@ -74,4 +98,7 @@ cat <<'EOF'
 3. MCP 能力 URL：https://<your-domain>/mcp/$(grep BRAIN_MCP_TOKEN ~/.config/hindsight/env | cut -d= -f2)
    （只把这个 URL 给受信任的客户端；泄露 = 该 profile 可见内容泄露，轮换方法见
    docs/remote-access.md）
+4. /ingest（D-6 浏览器扩展上传）：token 在 ~/.config/hindsight/env 的
+   BRAIN_INGEST_TOKEN；需要 remote.yaml 的 ingest.inbox 与 Cloudflare Access
+   Service Auth 策略，步骤见 deploy/vm/README.md §ChatGPT 采集器。
 EOF

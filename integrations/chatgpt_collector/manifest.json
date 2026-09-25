@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Hindsight ChatGPT Collector",
+  "version": "0.1.0",
+  "description": "把 chatgpt.com 的对话（后端原始 JSON）定时补采并上传到自己的 Hindsight。会话 token 不落盘、不外发。",
+  "minimum_chrome_version": "110",
+  "permissions": ["alarms", "storage", "tabs"],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "optional_host_permissions": ["https://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html" },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["adapters/chatgpt.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content/bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

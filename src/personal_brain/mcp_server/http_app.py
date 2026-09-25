@@ -14,13 +14,17 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import hmac
 import json
 import logging
+import os
 import sqlite3
+import string
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, MutableMapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -203,6 +207,29 @@ def _log_path(path: str) -> str:
     if path.startswith("/mcp/"):
         return "/mcp/<redacted>"
     return path
+
+
+def _is_valid_ingest_token(token: str) -> bool:
+    """D-6：/ingest 独立 token 要求 ≥32 字节 hex（64 个 hex 字符）。"""
+    return len(token) >= 64 and all(c in string.hexdigits for c in token)
+
+
+def _is_valid_conversation_batch(value: Any) -> bool:
+    """最小结构校验：数组、每项有 mapping（映射）与 conversation_id（非空字符串）。
+
+    只判结构不判内容——导入器负责完整校验；这里挡住明显不合格的请求避免落盘。
+    """
+    if not isinstance(value, list) or not value:
+        return False
+    for item in value:
+        if not isinstance(item, dict):
+            return False
+        if not isinstance(item.get("mapping"), dict):
+            return False
+        cid = item.get("conversation_id")
+        if not isinstance(cid, str) or not cid:
+            return False
+    return True
 
 
 class SecurityMiddleware:
@@ -486,6 +513,74 @@ def create_app(
         Route("/", index_page, methods=["GET"]),
         Mount("/static", app=StaticFiles(directory=STATIC_DIR)),
     ]
+
+    # ------------------------------------------------------------------
+    # D-6：/ingest/<namespace> —— 浏览器扩展的对话批次直接落盘 inbox，
+    # 由 D-5 的定时导入入库。只做校验 + 原子写文件，不碰数据库。
+    # 鉴权独立 token（BRAIN_INGEST_TOKEN，≥32 字节 hex）；未配置则不注册。
+    # ------------------------------------------------------------------
+    ingest_token = os.environ.get("BRAIN_INGEST_TOKEN", "")
+    ingest_cfg = config.ingest
+    if ingest_cfg is not None and _is_valid_ingest_token(ingest_token):
+        ingest_limiter = RateLimiter(
+            max_requests=ingest_cfg.max_requests_per_minute, window_seconds=60.0,
+        )
+
+        async def api_ingest(request: Request) -> Response:
+            namespace = request.path_params["namespace"]
+            assert ingest_cfg is not None
+            if namespace not in ingest_cfg.namespaces:
+                return JSONResponse({"error": "NOT_FOUND"}, status_code=404)  # 不区分原因
+            auth = request.headers.get("authorization", "")
+            if not hmac.compare_digest(auth, f"Bearer {ingest_token}"):
+                return JSONResponse({"error": "NOT_FOUND"}, status_code=404)
+            client_ip = request.headers.get("cf-connecting-ip") or (
+                request.client.host if request.client else ""
+            )
+            if not ingest_limiter.allow(client_ip):
+                return JSONResponse({"error": "RATE_LIMITED"}, status_code=429)
+            body = await request.body()
+            if len(body) > ingest_cfg.max_body_bytes:
+                return JSONResponse({"error": "TOO_LARGE"}, status_code=400)
+            try:
+                conversations = json.loads(body)
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse({"error": "BAD_REQUEST"}, status_code=400)
+            if not _is_valid_conversation_batch(conversations):
+                return JSONResponse({"error": "BAD_REQUEST"}, status_code=400)
+            digest = hashlib.sha256(body).hexdigest()[:12]
+            namespace_dir = ingest_cfg.inbox_dir / namespace
+            namespace_dir.mkdir(parents=True, exist_ok=True)
+            existing = sorted(namespace_dir.glob(f"*-{digest}.json"))
+            if existing:  # 同内容重复提交：同一文件名，直接 200
+                logger.info(
+                    "ingest namespace=%s conversations=%d bytes=%d status=200 duplicate",
+                    namespace, len(conversations), len(body),
+                )
+                return JSONResponse(
+                    {"batch": existing[-1].name, "conversations": len(conversations)},
+                    status_code=200,
+                )
+            filename = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{digest}.json"
+            tmp = namespace_dir / (filename + ".tmp")
+            tmp.write_bytes(body)
+            tmp.replace(namespace_dir / filename)  # 同目录原子 rename
+            logger.info(
+                "ingest namespace=%s conversations=%d bytes=%d status=202",
+                namespace, len(conversations), len(body),
+            )
+            return JSONResponse(
+                {"batch": filename, "conversations": len(conversations)},
+                status_code=202,
+            )
+
+        routes.append(Route("/ingest/{namespace}", api_ingest, methods=["POST"]))
+    else:
+        logger.info(
+            "/ingest 未注册：需要 ingest.inbox 配置与 BRAIN_INGEST_TOKEN"
+            "（≥32 字节 hex）环境变量"
+        )
+
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):

@@ -45,6 +45,16 @@ class AccessProfile:
 
 
 @dataclass(frozen=True)
+class IngestConfig:
+    """D-6 /ingest 配置：浏览器扩展把对话批次直接写进 inbox（不碰数据库）。"""
+
+    inbox_dir: Path
+    namespaces: tuple[str, ...] = ("main",)  # 白名单；inbox 路径不能来自请求
+    max_body_bytes: int = 20_000_000  # 请求体上限
+    max_requests_per_minute: int = 10  # 每 IP 节流
+
+
+@dataclass(frozen=True)
 class McpServerConfig:
     db_path: Path
     timezone: str
@@ -52,6 +62,7 @@ class McpServerConfig:
     search_limits: dict[str, int]  # §6.3 可配置项（受 SearchLimits 硬上限钳制）
     vault: VaultConfig | None = None
     semantic: SemanticConfig = SemanticConfig()
+    ingest: IngestConfig | None = None  # D-6：未配置时 /ingest 不注册
     # D-3 远程接入（可选）：设置后 HTTP 模式的 REST/页面校验
     # Cf-Access-Jwt-Assertion；缺省则不校验（HTTP 服务端启动时打印警告）。
     access_aud: str | None = None
@@ -163,6 +174,23 @@ def load_mcp_config(path: Path) -> McpServerConfig:
         raise ProfileConfigError(
             "remote.access_aud 与 remote.access_team_domain 必须同时设置或同时省略"
         )
+    ingest_raw = raw.get("ingest")
+    ingest: IngestConfig | None = None
+    if ingest_raw is not None:
+        if not isinstance(ingest_raw, dict) or not ingest_raw.get("inbox"):
+            raise ProfileConfigError("ingest 需要 inbox（inbox 批次目录）")
+        namespaces_raw = ingest_raw.get("namespaces", ["main"])
+        if not isinstance(namespaces_raw, list) or not namespaces_raw or \
+                any(not isinstance(n, str) or not n.strip() for n in namespaces_raw):
+            raise ProfileConfigError("ingest.namespaces 必须是非空字符串列表")
+        ingest = IngestConfig(
+            inbox_dir=Path(str(ingest_raw["inbox"])).expanduser(),
+            namespaces=tuple(namespaces_raw),
+            max_body_bytes=int(ingest_raw.get("max_body_bytes", 20_000_000)),
+            max_requests_per_minute=int(ingest_raw.get("max_requests_per_minute", 10)),
+        )
+        if ingest.max_body_bytes < 1 or ingest.max_requests_per_minute < 1:
+            raise ProfileConfigError("ingest 限流参数必须为正数")
     return McpServerConfig(
         db_path=Path(raw["database_path"]).expanduser(),
         timezone=str(raw.get("timezone", "UTC")),
@@ -170,6 +198,7 @@ def load_mcp_config(path: Path) -> McpServerConfig:
         search_limits=dict(raw.get("search", {})),
         vault=vault,
         semantic=semantic,
+        ingest=ingest,
         access_aud=str(access_aud) if access_aud else None,
         access_team_domain=str(access_team_domain) if access_team_domain else None,
     )

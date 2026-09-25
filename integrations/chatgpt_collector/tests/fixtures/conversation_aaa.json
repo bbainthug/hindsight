@@ -1,0 +1,29 @@
+{
+  "title": "deploy 相关讨论",
+  "create_time": 1758000000,
+  "update_time": 1758010000,
+  "mapping": {
+    "root": { "message": null, "parent": null, "children": ["n1"] },
+    "n1": {
+      "message": {
+        "author": { "role": "user" },
+        "create_time": 1758000000,
+        "content": { "content_type": "text", "parts": ["帮我看看 deploy 脚本"] }
+      },
+      "parent": "root",
+      "children": ["n2"]
+    },
+    "n2": {
+      "message": {
+        "author": { "role": "assistant" },
+        "create_time": 1758000060,
+        "content": { "content_type": "text", "parts": ["好的，deploy 脚本如下……"] }
+      },
+      "parent": "n1",
+      "children": []
+    }
+  },
+  "current_node": "n2",
+  "conversation_id": "conv-aaa-1",
+  "is_temporary": false
+}

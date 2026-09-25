@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px/1.5 system-ui, sans-serif; width: 340px; margin: 0; padding: 12px; }
+    h3 { margin: 0 0 8px; }
+    .row { display: flex; justify-content: space-between; margin: 4px 0; color: #333; }
+    .val { color: #000; font-weight: 600; }
+    .err { color: #b00; font-size: 12px; white-space: pre-wrap; }
+    ul { list-style: none; margin: 6px 0; padding: 0; max-height: 180px; overflow-y: auto; }
+    li { padding: 3px 0; border-bottom: 1px solid #eee; display: flex; gap: 6px; align-items: center; }
+    li .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge { font-size: 11px; padding: 0 6px; border-radius: 8px; }
+    .pending { background: #ffe9a8; }
+    .done { background: #d8f5d8; }
+    button { padding: 4px 10px; }
+    .hint { color: #888; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h3>Hindsight Collector</h3>
+  <div class="row"><span>状态</span><span class="val" id="paused">—</span></div>
+  <div class="row"><span>待上传</span><span class="val" id="pending">—</span></div>
+  <div class="row"><span>本地已存</span><span class="val" id="stored">—</span></div>
+  <div class="row"><span>上次上传</span><span class="val" id="lastSync">—</span></div>
+  <div class="err" id="error"></div>
+  <button id="syncNow">立即同步</button>
+  <button id="openOptions">设置</button>
+  <p class="hint">"不采"会把该对话从本地删除并加入排除列表。</p>
+  <ul id="recent"></ul>
+  <script src="popup.js"></script>
+</body>
+</html>

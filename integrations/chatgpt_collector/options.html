@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>Hindsight Collector 设置</title>
+  <style>
+    body { font: 13px/1.6 system-ui, sans-serif; max-width: 560px; margin: 24px auto; padding: 0 16px; }
+    label { display: block; margin-top: 14px; font-weight: 600; }
+    input[type=text], input[type=password] { width: 100%; box-sizing: border-box; padding: 6px; }
+    .hint { color: #666; font-size: 12px; }
+    button { margin-top: 18px; padding: 8px 16px; }
+    #saved { color: #080; margin-left: 10px; }
+    code { background: #f4f4f4; padding: 1px 4px; }
+  </style>
+</head>
+<body>
+  <h2>Hindsight ChatGPT Collector 设置</h2>
+  <p class="hint">设置保存在 <code>chrome.storage.local</code>（不同步到其他设备、不上传）。
+    ChatGPT 的会话 token 不经过本扩展的任何存储。</p>
+
+  <label for="endpoint">Hindsight 地址</label>
+  <input type="text" id="endpoint" placeholder="https://brain.example.com">
+  <p class="hint">只填协议 + 域名。保存时会请求对该域名的访问权限（optional host permission）。</p>
+
+  <label for="ingestToken">写入 token（BRAIN_INGEST_TOKEN）</label>
+  <input type="password" id="ingestToken" placeholder="64 位 hex，来自 VM ~/.config/hindsight/env">
+
+  <label for="cfClientId">Cloudflare Access 服务令牌 Client ID（可选）</label>
+  <input type="text" id="cfClientId" autocomplete="off">
+
+  <label for="cfClientSecret">Cloudflare Access 服务令牌 Client Secret（可选）</label>
+  <input type="password" id="cfClientSecret" autocomplete="off">
+
+  <label><input type="checkbox" id="paused"> 暂停采集与上传</label>
+
+  <button id="save">保存</button><span id="saved"></span>
+
+  <script src="options.js"></script>
+</body>
+</html>

@@ -50,3 +50,11 @@ semantic:
 # remote:
 #   access_aud: <Cloudflare Access 应用的 AUD>
 #   access_team_domain: <your-team>.cloudflareaccess.com
+# D-6 /ingest（可选；仅 --transport http 且设置 BRAIN_INGEST_TOKEN 环境变量时注册）：
+# 浏览器扩展把 ChatGPT 对话批次直接写进 inbox，由 D-5 定时导入入库。服务端只落盘，
+# 不碰数据库。token 生成：python3 -c 'import secrets; print(secrets.token_hex(32))'
+# ingest:
+#   inbox: ~/brain-data/inbox       # 批次落盘目录（不能来自请求）
+#   namespaces: [main]              # 白名单；扩展固定用 main 与历史导出去重
+#   max_body_bytes: 20000000        # 单请求上限
+#   max_requests_per_minute: 10     # 每 IP 节流

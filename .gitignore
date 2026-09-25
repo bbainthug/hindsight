@@ -32,3 +32,4 @@ evals/private/
 /campus-ats-demo/
 /integrations/*
 !/integrations/agent_sync/
+!/integrations/chatgpt_collector/

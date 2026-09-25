@@ -79,6 +79,60 @@ cloudflared tunnel run hindsight-mcp
   （`<token>` 来自 `~/.config/hindsight/env` 的 `BRAIN_MCP_TOKEN`）。
 - 浏览器打开 `https://brain.<your-domain>/`：走 Access 邮箱 OTP 登录后看到查询页。
 
+### 5. ChatGPT 采集器（D-6：扩展 → /ingest → inbox）
+
+服务端 `/ingest/<namespace>` 只把浏览器扩展上传的对话批次写进 inbox（不碰数据库），
+由已有的 `hindsight-import.timer`（D-5）定时导入。启用步骤：
+
+1. **remote.yaml 加 ingest 段**（`~/brain-data/remote.yaml`）：
+
+   ```yaml
+   ingest:
+     inbox: ~/brain-data/inbox
+     namespaces: [main]
+   ```
+
+2. **生成写入 token**（`install.sh` 现在会自动做；已有 env 文件时补一条即可）：
+
+   ```bash
+   grep -q BRAIN_INGEST_TOKEN ~/.config/hindsight/env || \
+     printf 'BRAIN_INGEST_TOKEN=%s\n' \
+       "$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> ~/.config/hindsight/env
+   chmod 600 ~/.config/hindsight/env
+   ```
+
+3. **重启服务**（新路由与 token 生效）：
+
+   ```bash
+   systemctl --user restart hindsight-mcp
+   journalctl --user -u hindsight-mcp -n 20 | grep ingest   # 应看到 /ingest 注册说明
+   ```
+
+4. **Cloudflare Access：为 /ingest 建 Service Auth 应用**（控制台由你操作）：
+
+   1. **Access > Applications > Add an application > Self-hosted**
+      - Application domain: `brain.<your-domain>/ingest`（只覆盖 /ingest 路径）
+   2. **Policy**：Action=Allow，Include = **Service Auth**，填 Service Token：
+      - 在 **Access > Service Auth > Service Tokens > Create Service Token** 生成
+        Client ID 与 Client Secret（Secret 只显示一次，记下来）；
+      - 扩展设置页填这对 Client ID / Secret；请求头
+        `CF-Access-Client-Id / CF-Access-Client-Secret` 由扩展自动附上。
+   3. 该应用只挂 `/ingest` 路径，不影响主应用的邮箱 OTP 与 `/mcp/*` Bypass 策略。
+
+5. **扩展安装与设置**：见 `integrations/chatgpt_collector/README.md`
+   （chrome://extensions 开发者模式加载 → 设置页填 Hindsight 地址、
+   `BRAIN_INGEST_TOKEN`、Cloudflare 服务令牌 → 立即同步）。
+
+6. **验证**：
+
+   ```bash
+   ls ~/brain-data/inbox/main/          # 扩展同步后应出现 <UTC>-<hash>.json
+   journalctl --user -u hindsight-import -n 20
+   ```
+
+安全边界：写入 token 只能往 inbox 放文件（20 MB/次、10 次/分钟/IP），读不了库也改不了库；
+ChatGPT 的会话 token 不经过 VM，也不落任何盘。
+
 ### 5. 批次同步与定时导入（D-5，常规路径）
 
 Mac 侧 launchd（`install-launchd.sh --vm-host hindsight-vm`）每 15 分钟做两件事：
