@@ -136,7 +136,8 @@ def semantic_meta(conn: sqlite3.Connection) -> sqlite3.Row | None:
 
 
 _INDEXABLE_PAGE = 500
-EMBED_MAX_CHUNKS_PER_CALL = 8  # 实测 1 GB VM：一次 32 块长文本推理峰值 577MB，8 块 340MB（模型常驻约 220MB）
+# 实测 1 GB VM：一次 32 块长文本推理峰值 577MB，8 块 340MB（模型常驻约 220MB）
+EMBED_MAX_CHUNKS_PER_CALL = 8
 
 
 def _iter_indexable_revisions(conn: sqlite3.Connection) -> Iterator[sqlite3.Row]:
