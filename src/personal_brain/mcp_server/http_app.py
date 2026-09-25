@@ -54,7 +54,9 @@ from personal_brain.mcp_server.service import (
     tool_brain_status,
     tool_get_event,
     tool_get_recent_events,
+    tool_recall,
     tool_search_history,
+    tool_timeline,
 )
 from personal_brain.policy.profiles import McpServerConfig
 from personal_brain.retrieval.search import SearchLimits
@@ -457,6 +459,76 @@ def create_app(
             pool.release(conn)
         return JSONResponse(payload)
 
+    async def api_recall(request: Request) -> Response:
+        """D-7：GET /api/recall —— 一次调用返回带上下文的回忆片段。"""
+        qp = request.query_params
+        args: dict[str, Any] = {"query": qp.get("q")}
+        for src, dst in (
+            ("mode", "mode"),
+            ("match_mode", "match_mode"),
+            ("speaker", "speaker"),
+            ("from", "date_from"),
+            ("to", "date_to"),
+            ("source", "source"),
+        ):
+            value = qp.get(src)
+            if value is not None:
+                args[dst] = value
+        for name in ("max_snippets", "context_radius", "char_budget"):
+            try:
+                int_value = _parse_int_param(request, name)
+            except ToolError as exc:
+                return _tool_error_response(exc)
+            if int_value is not None:
+                args[name] = int_value
+        conn = await pool.acquire()
+        try:
+            payload = run_with_epoch_retry(
+                tool_recall, conn, profile, args, limits, config.timezone,
+                semantic_config=config.semantic,
+            )
+        except ToolError as exc:
+            return _tool_error_response(exc)
+        except Exception as exc:  # noqa: BLE001
+            return _internal_error_response("api_recall", exc)
+        finally:
+            pool.release(conn)
+        return JSONResponse(payload)
+
+    async def api_timeline(request: Request) -> Response:
+        """D-7：GET /api/timeline —— 按天列出活跃对话的结构化统计。"""
+        qp = request.query_params
+        args: dict[str, Any] = {"date_from": qp.get("from"), "date_to": qp.get("to")}
+        value = qp.get("source")
+        if value is not None:
+            args["source"] = value
+        if qp.get("with_first_line") is not None:
+            flag = qp.get("with_first_line", "").lower()
+            if flag not in ("true", "false", "1", "0"):
+                return JSONResponse(
+                    {"error": "INVALID_PARAMS", "message": "with_first_line 必须是布尔"},
+                    status_code=400,
+                )
+            args["with_first_line"] = flag in ("true", "1")
+        try:
+            per_day = _parse_int_param(request, "limit_per_day")
+        except ToolError as exc:
+            return _tool_error_response(exc)
+        if per_day is not None:
+            args["limit_per_day"] = per_day
+        conn = await pool.acquire()
+        try:
+            payload = run_with_epoch_retry(
+                tool_timeline, conn, profile, args, limits, config.timezone,
+            )
+        except ToolError as exc:
+            return _tool_error_response(exc)
+        except Exception as exc:  # noqa: BLE001
+            return _internal_error_response("api_timeline", exc)
+        finally:
+            pool.release(conn)
+        return JSONResponse(payload)
+
     async def api_recent(request: Request) -> Response:
         args: dict[str, Any] = {}
         try:
@@ -508,6 +580,8 @@ def create_app(
         Mount("/mcp", app=McpTokenGate(session_manager, token)),
         Route("/api/status", api_status, methods=["GET"]),
         Route("/api/search", api_search, methods=["GET"]),
+        Route("/api/recall", api_recall, methods=["GET"]),
+        Route("/api/timeline", api_timeline, methods=["GET"]),
         Route("/api/recent", api_recent, methods=["GET"]),
         Route("/api/event/{event_id}", api_event, methods=["GET"]),
         Route("/", index_page, methods=["GET"]),

@@ -15,6 +15,10 @@
   四家 agent 的会话文件增量入库（[docs/agent-sync.md](docs/agent-sync.md)）。
 - **检索**：FTS5 精确匹配 + 中文二元切分，结果带原文偏移；`mode=hybrid` 叠加本地向量召回
   （bge-small-zh，RRF 融合），语义命中明确标为推断。
+- **一次调用的回忆与时间线**（D-7）：`recall` 回答"我之前关于 X 说过/想过什么"——一次返回
+  带前后文同对话上下文的原文片段（字数预算约束、逐条可回查）；`timeline` 回答"某段时间我在
+  忙什么"——按天列出活跃对话的统计轮廓（只统计可见内容，不做摘要）。
+  见 [docs/unified-retrieval.md](docs/unified-retrieval.md)。
 - **权限**：服务端绑定 profile；逐结果再授权；"无权限"和"不存在"返回一致；远程 profile 遮蔽
   凭据形态、拒绝敏感标签。撤回是版本化的，不是删行。
 - **接入**：本机 agent 用 stdio MCP；远程用 `--transport http` + 反向代理（我用 Cloudflare Tunnel

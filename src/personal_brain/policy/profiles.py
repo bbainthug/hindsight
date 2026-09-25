@@ -22,6 +22,7 @@ from personal_brain.retrieval.vault import VaultConfig
 
 ALLOWED_TOOLS = (
     "brain_status", "search_history", "get_recent_events", "get_event",
+    "recall", "timeline",  # D-7
     "search_brain", "search_vault", "get_vault_note",
 )
 DELIVERY_BOUNDARIES = ("local_only", "remote_model_allowed")
