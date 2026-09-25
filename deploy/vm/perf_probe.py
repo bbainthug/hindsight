@@ -110,7 +110,7 @@ def main() -> int:
     ap.add_argument("--token", default=None, help="默认读 ~/.config/hindsight/env")
     ap.add_argument("--query", default="职业")
     ap.add_argument("--warmup", type=int, default=3)
-    ap.add_argument("--repeats", type=int, default=30)
+    ap.add_argument("--repeats", type=int, default=20)
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--label", default="空载", help="仅用于输出标签，如“导入进行中”")
     args = ap.parse_args()

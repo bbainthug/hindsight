@@ -159,7 +159,7 @@ WHERE availability=?` / `... classification_status!=?`），旧索引
 `EXPLAIN QUERY PLAN` 确认这两个子查询从 `SEARCH ... USING INDEX` 变成
 `SEARCH ... USING COVERING INDEX`（不再回表）。本地合成库（1 万 revision，
 数据全在页缓存里）测不出差异，VM 慢盘下每行省一次回表 I/O 应该更明显——
-下面"VM 实测"待补真实数字。
+下面是 VM 实测数字。
 
 **`/api/search` 分段（本地合成库 1 万 events、命中缓存后的热态，仅供参考，
 不代表 VM 磁盘 I/O 特征）**：
@@ -181,18 +181,31 @@ WHERE availability=?` / `... classification_status!=?`），旧索引
 events 合成库），没有任何一段单独超过 1 秒，因此没有触发"单段超 1s 才优化"
 的条件。
 
-**VM 实测（待补）**：复现命令见下，结果由用户在 VM 上跑出后回填本节。
+**VM 实测（2026-09-25，Azure B2ats v2 2 核 / 1 GB，生产库 6.5 万 events，schema 6）**：
+
+| 路径 | 改动前 | 改动后 P50 / P95（热态，各 20 次） |
+| --- | --- | --- |
+| REST `/api/search`（VM 本机） | 约 9 s | 49 ms / 52 ms |
+| MCP `tools/call search_history`（VM 本机） | 约 9 s | 51 ms / 52 ms |
+| MCP `search_history`（经公网 Cloudflare 隧道，客户端在中国大陆） | 3–16 s | 首次 1.3 s，之后 0.43–0.45 s |
+
+"导入进行中"未单独测：D-5 之后一轮批次导入通常不到 20 秒。
+
+注意：`hindsight-mcp` 以只读方式打开库，**不会执行 migration**。升级代码后先让导入器或一次读写连接
+把 schema 升到最新（`hindsight-import.service` 下一轮导入会自动完成），再重启服务。
+`perf_probe.py` 默认 `--repeats 30` 加预热会超过每分钟 60 次的限速，得到 429；用 `--repeats 20`，两次运行间隔一分钟。
 
 ```bash
-# 重启服务以应用新代码（migration 6 会在启动时自动跑）：
+# 先升级 schema（只读服务不会做），再重启服务：
+uv run python -c "from pathlib import Path; from personal_brain.history.db import connect; connect(Path.home()/'brain-data/db/brain.sqlite')"
 systemctl --user restart hindsight-mcp
 
 # 空载：REST /api/search 与 MCP tools/call search_history 的 P50/P95（各 30 次，可调 --repeats）
-./deploy/vm/perf_probe.py --label 空载 --repeats 30
+./deploy/vm/perf_probe.py --label 空载 --repeats 20
 
 # 导入进行中：另开一个终端触发一轮导入，同时跑探针
 systemctl --user start hindsight-import.service   # 或等 hindsight-import.timer 自然触发
-./deploy/vm/perf_probe.py --label 导入进行中 --repeats 30
+./deploy/vm/perf_probe.py --label 导入进行中 --repeats 20
 
 # _coverage 首算耗时 + soak 漂移/RSS/完整性门槛（合成库，不碰生产库）：
 uv run brain soak --mode both
