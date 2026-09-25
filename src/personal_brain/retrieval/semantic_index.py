@@ -257,6 +257,8 @@ def semantic_unavailable_reason(
     meta = semantic_meta(conn)
     if meta is None:
         return "index_not_built"
+    if not meta["built_at"]:
+        return "index_building"
     # index_version 只取决于参数组合；模型不一致必然表现为版本不一致。
     if meta["index_version"] != index_version_of(config, int(meta["dimension"])):
         return "index_version_mismatch"
@@ -375,6 +377,17 @@ def reindex_semantic(
             conn.execute("DELETE FROM revision_chunks")
             conn.execute("DELETE FROM semantic_index_meta")
             ensure_vector_table(conn, provider.dimension)
+            # 先写一行"构建中"（built_at 为空串）：中途被杀后，下次按相同参数增量续建，
+            # 而不是因为没有 meta 又从头全量重建；查询路径在构建完成前视为不可用。
+            conn.execute(
+                """
+                INSERT INTO semantic_index_meta
+                    (id, model_id, dimension, chunk_chars, chunk_overlap,
+                     index_version, built_at)
+                VALUES (1, ?, ?, ?, ?, ?, '')
+                """,
+                (provider.model_id, provider.dimension, chunk_chars, chunk_overlap, version),
+            )
         except BaseException:
             conn.rollback()
             raise

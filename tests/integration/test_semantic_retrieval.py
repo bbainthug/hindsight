@@ -511,3 +511,39 @@ class TestReindexMemoryBounded:
         stats = reindex_semantic(conn, HashEmbeddingProvider())
         assert stats["chunks_new"] > 0
         conn.close()
+
+
+class TestReindexResume:
+    """回归：首次全量构建中途被杀，下次启动不能又从头全量重建。"""
+
+    def test_interrupted_full_build_resumes_incrementally(self, tmp_path: Path, monkeypatch):
+        import personal_brain.retrieval.semantic_index as si
+
+        monkeypatch.setattr(si, "EMBED_BATCH", 5)  # 合成库小：每 5 条提交一次，才能留下已提交的部分
+        conn = _import_corpus(tmp_path)
+
+        class Dies(HashEmbeddingProvider):
+            def __init__(self, budget: int) -> None:
+                super().__init__()
+                self.budget = budget
+
+            def embed(self, texts):
+                self.budget -= 1
+                if self.budget < 0:
+                    raise KeyboardInterrupt("simulated kill")
+                return super().embed(texts)
+
+        with pytest.raises(KeyboardInterrupt):
+            reindex_semantic(conn, Dies(budget=12), full=True)
+        partial = conn.execute(
+            "SELECT COUNT(DISTINCT revision_id) FROM revision_chunks"
+        ).fetchone()[0]
+        assert partial > 0
+        config = SemanticConfig("hash-embedding-test", 600, 100)
+        assert semantic_unavailable_reason(conn, config, 256) == "index_building"
+
+        stats = reindex_semantic(conn, HashEmbeddingProvider())
+        assert stats["mode"] == "incremental"
+        assert stats["revisions_embedded"] < stats["revisions_scanned"]  # 没有从头重做
+        assert semantic_unavailable_reason(conn, config, 256) is None
+        conn.close()
