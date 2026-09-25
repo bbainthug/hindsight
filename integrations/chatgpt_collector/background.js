@@ -55,14 +55,12 @@ async function runCrawl() {
   const waterline = (await db.getMeta("waterline")) ?? null;
   let tab;
   try {
-    const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
-    if (tabs.length) {
-      tab = tabs[0];
-    } else {
-      tab = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
-      await waitTabComplete(tab.id);
-      await sleep(3000); // 页面初始化
-    }
+    // 总是自己开一个后台标签页，用完关掉。不复用用户已开的 chatgpt.com 标签页：
+    // 扩展安装 / 更新之前打开的页面里没有注入 content script（会报
+    // "Receiving end does not exist"），而且不能动用户自己的标签页。
+    tab = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
+    await waitTabComplete(tab.id);
+    await sleep(3000); // 页面初始化
     const listed = await requestAdapter(tab.id, "crawl", { offset: 0, limit: 28 });
     if (listed.error) throw new Error(listed.error);
     const picks = core.pickForCrawl(listed.conversations, null, excluded, waterline);
@@ -82,8 +80,8 @@ async function runCrawl() {
   } catch (err) {
     await setLastError(err);
   } finally {
-    // 后台 tab 用完即关（复用的前台 tab 除外）
-    if (tab && !tab.active) chrome.tabs.remove(tab.id).catch(() => {});
+    // 只关自己开的那个后台标签页
+    if (tab) chrome.tabs.remove(tab.id).catch(() => {});
   }
 }
 
