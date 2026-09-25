@@ -459,3 +459,55 @@ class TestEvalRegressionGate:
             assert sem and all(r.passed for r in sem)
         finally:
             conn.close()
+
+
+class TestReindexMemoryBounded:
+    """回归：1 GB 内存的 VM 上全量重建被 OOM 杀掉。
+
+    重建不得一次性物化全库正文；超长消息切出的大量 chunk 要分小批送进模型。
+    """
+
+    def test_long_message_embedded_in_bounded_calls(self, tmp_path: Path):
+        from personal_brain.retrieval.semantic_index import EMBED_MAX_CHUNKS_PER_CALL
+
+        long_text = "".join(f"第{i}段，关于找工作和投简历的长篇记录。" * 12 for i in range(120))
+        mapping = dict([
+            node("root", None, None, ["n1"]),
+            node("n1", text_message("m-long", "user", long_text, 1790000000.0), "root", []),
+        ])
+        conv = build_conversation("conv-long", "长消息", 1790000000.0, mapping, "n1")
+        conn = connect(tmp_path / "brain.sqlite")
+        (tmp_path / "archives").mkdir()
+        ChatGPTImporter(conn, tmp_path / "archives").import_archive(
+            write_zip([conv], tmp_path / "a.zip"), "testuser"
+        )
+
+        class Recording(HashEmbeddingProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls: list[int] = []
+
+            def embed(self, texts):
+                self.calls.append(len(texts))
+                return super().embed(texts)
+
+        provider = Recording()
+        stats = reindex_semantic(conn, provider)
+        assert stats["chunks_new"] > EMBED_MAX_CHUNKS_PER_CALL  # 确实是一条会切出很多块的消息
+        assert max(provider.calls) <= EMBED_MAX_CHUNKS_PER_CALL
+        assert sum(provider.calls) == stats["chunks_new"]
+        assert reindex_semantic(conn, provider)["chunks_new"] == 0  # 仍幂等
+        conn.close()
+
+    def test_reindex_does_not_materialize_all_revisions(self, tmp_path: Path, monkeypatch):
+        import personal_brain.retrieval.semantic_index as si
+
+        conn = _import_corpus(tmp_path)
+
+        def boom(_conn):
+            raise AssertionError("reindex 不应一次性物化全部 revision")
+
+        monkeypatch.setattr(si, "_indexable_revisions", boom)
+        stats = reindex_semantic(conn, HashEmbeddingProvider())
+        assert stats["chunks_new"] > 0
+        conn.close()

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -134,37 +135,57 @@ def semantic_meta(conn: sqlite3.Connection) -> sqlite3.Row | None:
         raise
 
 
+_INDEXABLE_PAGE = 500
+EMBED_MAX_CHUNKS_PER_CALL = 32  # 超长消息切出的大量 chunk 分小批送模型，避免推理内存尖峰
+
+
+def _iter_indexable_revisions(conn: sqlite3.Connection) -> Iterator[sqlite3.Row]:
+    """按 revision_id 分页流式产出当前可索引 revision；凭据形态不算作索引缺口。
+
+    不一次性物化全库正文：6 万条级、含超长消息的库在 1 GB 内存机器上会被 OOM 杀掉。
+    每页 fetchall 后再产出，迭代期间不持有打开的游标，调用方可在两页之间写库。
+    """
+    last = ""
+    while True:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT r.revision_id, r.raw_text
+            FROM event_revisions r
+            JOIN events e ON e.event_id = r.event_id
+            JOIN sources s ON s.source_id = e.source_id
+            WHERE s.status != 'withdrawn'
+              AND r.revision_id > ?
+              AND EXISTS (
+                SELECT 1 FROM revision_policy_state ps
+                WHERE ps.revision_id = r.revision_id
+                  AND ps.valid_to IS NULL AND ps.availability = 'available')
+            ORDER BY r.revision_id
+            LIMIT ?
+            """,
+            (last, _INDEXABLE_PAGE),
+        ).fetchall()
+        if not rows:
+            return
+        last = rows[-1]["revision_id"]
+        for r in rows:
+            if r["raw_text"] and not contains_known_credentials(r["raw_text"]):
+                yield r
+
+
 def _indexable_revisions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """返回当前可索引 revision；凭据形态不算作索引缺口。"""
-    rows = conn.execute(
-        """
-        SELECT DISTINCT r.revision_id, r.raw_text
-        FROM event_revisions r
-        JOIN events e ON e.event_id = r.event_id
-        JOIN sources s ON s.source_id = e.source_id
-        WHERE s.status != 'withdrawn'
-          AND EXISTS (
-            SELECT 1 FROM revision_policy_state ps
-            WHERE ps.revision_id = r.revision_id
-              AND ps.valid_to IS NULL AND ps.availability = 'available')
-        ORDER BY r.revision_id
-        """
-    ).fetchall()
-    return [
-        r for r in rows
-        if r["raw_text"] and not contains_known_credentials(r["raw_text"])
-    ]
+    """全量列表（仅供小库 / 测试使用；生产路径用 _iter_indexable_revisions）。"""
+    return list(_iter_indexable_revisions(conn))
 
 
 def _indexable_revision_count(conn: sqlite3.Connection) -> int:
-    return len(_indexable_revisions(conn))
+    return sum(1 for _ in _iter_indexable_revisions(conn))
 
 
 def semantic_status(conn: sqlite3.Connection) -> dict:
     """只读状态汇总（doctor 用）：存在性、模型、维度、缺口。"""
     extension = load_vec_extension(conn)
     meta = semantic_meta(conn)
-    indexable_ids = {r["revision_id"] for r in _indexable_revisions(conn)}
+    indexable_ids = {r["revision_id"] for r in _iter_indexable_revisions(conn)}
     chunks_table = _table_exists(conn, "revision_chunks")
     indexed_ids = (
         {
@@ -331,15 +352,13 @@ def reindex_semantic(
 
     # 预先规范化，保证 provider 只接收与 FTS 相同的归一化文本；索引坐标
     # 因此天然是 normalized 坐标，查询时可交给 normalize_with_map 还原。
-    indexable = _indexable_revisions(conn)
-    prepared: list[tuple[sqlite3.Row, str, list[tuple[int, int]]]] = []
+    # 第一遍流式扫描：只记每个 revision 期望的 chunk 数（int），不留正文
     expected_chunks: dict[str, int] = {}
-    for row in indexable:
+    for row in _iter_indexable_revisions(conn):
         normalized, _ = normalize_with_map(row["raw_text"] or "")
-        spans = chunk_text(normalized, chunk_chars, chunk_overlap)
-        expected_chunks[row["revision_id"]] = len(spans)
-        if spans:
-            prepared.append((row, normalized, spans))
+        expected_chunks[row["revision_id"]] = len(
+            chunk_text(normalized, chunk_chars, chunk_overlap)
+        )
     eligible_ids = set(expected_chunks)
 
     # 调用方连接上可能有隐式事务（如刚做过 DML）；先落盘再开显式事务
@@ -420,14 +439,18 @@ def reindex_semantic(
         rid for rid, expected in expected_chunks.items()
         if expected > 0 and complete_counts.get(rid) == (expected, expected)
     }
-    todo = [item for item in prepared if item[0]["revision_id"] not in have]
+    # 第二遍流式扫描：只对缺失的 revision 重新归一化、分块、embed；每 EMBED_BATCH 个提交一次
     chunks_new = 0
-    for i in range(0, len(todo), EMBED_BATCH):
-        batch = todo[i : i + EMBED_BATCH]
+    revisions_embedded = 0
+    pending: list[tuple[str, list[tuple[int, int]], list[list[float]]]] = []
+
+    def flush() -> None:
+        nonlocal chunks_new
+        if not pending:
+            return
         conn.execute("BEGIN IMMEDIATE")
         try:
-            for row, normalized, spans in batch:
-                vectors = provider.embed([normalized[a:b] for a, b in spans])
+            for rid, spans, vectors in pending:
                 for j, ((a, b), vec) in enumerate(zip(spans, vectors, strict=True)):
                     cur = conn.execute(
                         """
@@ -435,7 +458,7 @@ def reindex_semantic(
                             (revision_id, chunk_index, text_start, text_end)
                         VALUES (?, ?, ?, ?)
                         """,
-                        (row["revision_id"], j, a, b),
+                        (rid, j, a, b),
                     )
                     conn.execute(
                         "INSERT INTO revision_chunk_vectors (chunk_id, embedding)"
@@ -447,6 +470,25 @@ def reindex_semantic(
             conn.rollback()
             raise
         conn.commit()
+        pending.clear()
+
+    for row in _iter_indexable_revisions(conn):
+        rid = row["revision_id"]
+        if rid in have or expected_chunks.get(rid, 0) == 0:
+            continue
+        normalized, _ = normalize_with_map(row["raw_text"] or "")
+        spans = chunk_text(normalized, chunk_chars, chunk_overlap)
+        if not spans:
+            continue
+        vectors: list[list[float]] = []
+        for k in range(0, len(spans), EMBED_MAX_CHUNKS_PER_CALL):
+            part = spans[k : k + EMBED_MAX_CHUNKS_PER_CALL]
+            vectors.extend(provider.embed([normalized[a:b] for a, b in part]))
+        pending.append((rid, spans, vectors))
+        revisions_embedded += 1
+        if len(pending) >= EMBED_BATCH:
+            flush()
+    flush()
 
     total_indexed = int(
         conn.execute("SELECT COUNT(DISTINCT revision_id) c FROM revision_chunks").fetchone()["c"]
@@ -478,8 +520,8 @@ def reindex_semantic(
         "model_id": provider.model_id,
         "dimension": provider.dimension,
         "index_version": version,
-        "revisions_scanned": len(indexable),
-        "revisions_embedded": len(todo),
+        "revisions_scanned": len(expected_chunks),
+        "revisions_embedded": revisions_embedded,
         "chunks_new": chunks_new,
         "chunks_total": int(
             conn.execute("SELECT COUNT(*) c FROM revision_chunks").fetchone()["c"]
