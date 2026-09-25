@@ -23,7 +23,7 @@ function loadAdapter(routes) {
   const messages = []; // adapter 发出的 postMessage
   const listeners = new Set();
   const windowObj = {
-    location: { origin: "https://chatgpt.com" },
+    location: { origin: "https://chatgpt.com", href: here },
     addEventListener: (type, fn) => { if (type === "message") listeners.add(fn); },
     postMessage: (msg) => messages.push(msg),
     fetch: async (url, init) => {
@@ -38,6 +38,7 @@ function loadAdapter(routes) {
     window: windowObj,
     fetch: windowObj.fetch,
     TextEncoder,
+    URL,
     console,
     setTimeout,
     clearTimeout,
@@ -156,4 +157,23 @@ test("adapter：fetch patch 捕获页面自身的对话响应（即时采集）�
   const msg = await waitFor(() =>
     a.messages.find((m) => m.payload && m.payload.source_of === "page"));
   assert.equal(msg.payload.conversations[0].conversation_id, "conv-aaa-1");
+});
+
+test("adapter：页面用相对路径请求对话时也能即时采集", async () => {
+  // 页面真实调用用的是相对路径
+  const routes = standardRoutes();
+  const b = loadAdapter({ ...routes, "/backend-api/conversation/conv-aaa-1": routes["https://chatgpt.com/backend-api/conversation/conv-aaa-1"] });
+  await (await b.window.fetch("/backend-api/conversation/conv-aaa-1")).json();
+  const msg = await waitFor(() => b.messages.find((m) => m.payload && m.payload.source_of === "page"));
+  assert.equal(msg.payload.conversations[0].conversation_id, "conv-aaa-1");
+});
+
+test("adapter：临时聊天（is_temporary_chat）不即时采集", async () => {
+  const routes = standardRoutes();
+  routes["https://chatgpt.com/backend-api/conversation/conv-aaa-1"] = async () =>
+    jsonResp({ ...CONV_FIXTURE, is_temporary_chat: true });
+  const a = loadAdapter(routes);
+  await (await a.window.fetch("https://chatgpt.com/backend-api/conversation/conv-aaa-1")).json();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(!a.messages.some((m) => m.payload && m.payload.source_of === "page"));
 });

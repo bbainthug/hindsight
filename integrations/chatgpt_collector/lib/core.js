@@ -26,7 +26,21 @@ export function needsFetch(remoteItem, stored, excludedSet) {
 
 /** 临时聊天判定：is_temporary 显式为 true 即跳过（字段缺失视为正常对话）。 */
 export function isTemporary(conv) {
-  return conv?.is_temporary === true || conv?.is_temporary === 1;
+  // ChatGPT 当前字段名是 is_temporary_chat；is_temporary 为旧名 / 兼容
+  const flag = (v) => v === true || v === 1;
+  return flag(conv?.is_temporary_chat) || flag(conv?.is_temporary);
+}
+
+/**
+ * 把 update_time 统一成 epoch 秒。列表接口给的是无时区 ISO 字符串
+ * （"2026-09-25T06:41:23.18434"，实为 UTC），单个对话接口给的是数字。
+ */
+export function toEpochSeconds(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v !== "string" || !v) return null;
+  const hasZone = /(Z|[+-]\d\d:?\d\d)$/.test(v);
+  const ms = Date.parse(hasZone ? v : v + "Z");
+  return Number.isFinite(ms) ? ms / 1000 : null;
 }
 
 /** 排除列表判定（兼容列表项的 id 与记录的 conversation_id 字段名） */
@@ -43,19 +57,22 @@ export function isExcluded(itemOrId, excludedSet) {
  * 晚于水位线，最多 CRAWL_MAX_PER_ROUND 个。
  */
 export function pickForCrawl(remoteItems, storedById, excluded, waterline) {
+  // 从旧到新拉：单轮上限截断时，没拉到的是较新的那些，下一轮水位线仍低于它们，不会被跳过
   const items = (remoteItems || [])
     .filter((it) => it && typeof it.id === "string" && it.id)
-    .filter((it) => !isExcluded(it, excluded))
-    .filter((it) => typeof it.update_time === "number" && it.update_time > (waterline ?? -Infinity))
-    .sort((a, b) => b.update_time - a.update_time);
+    .filter((it) => !isExcluded(it, excluded) && !isTemporary(it))
+    .map((it) => ({ ...it, update_time: toEpochSeconds(it.update_time) }))
+    .filter((it) => it.update_time != null && it.update_time > (waterline ?? -Infinity))
+    .sort((a, b) => a.update_time - b.update_time);
   return items.slice(0, CRAWL_MAX_PER_ROUND);
 }
 
-/** 本轮之后的新水位线：本轮见到的最大 update_time（与已拉取无关）。 */
-export function nextWaterline(remoteItems, current) {
+/** 本轮之后的新水位线：本轮**实际拉取成功**的条目里最大的 update_time。 */
+export function nextWaterline(crawledItems, current) {
   let max = current ?? 0;
-  for (const it of remoteItems || []) {
-    if (typeof it.update_time === "number" && it.update_time > max) max = it.update_time;
+  for (const it of crawledItems || []) {
+    const t = toEpochSeconds(it?.update_time);
+    if (t != null && t > max) max = t;
   }
   return max;
 }

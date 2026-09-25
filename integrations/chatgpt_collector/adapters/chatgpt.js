@@ -46,6 +46,15 @@
     return r;
   }
 
+  function toEpochSeconds(v) { // 与 lib/core.js 同名函数一致（MAIN world 不能 import）
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v !== "string" || !v) return null;
+    const hasZone = /(Z|[+-]\d\d:?\d\d)$/.test(v);
+    const ms = Date.parse(hasZone ? v : v + "Z");
+    return Number.isFinite(ms) ? ms / 1000 : null;
+  }
+  const isTemp = (o) => !!o && (o.is_temporary_chat === true || o.is_temporary === true);
+
   // 按更新时间排序的最近对话列表（分页由调用方决定 offset/limit）
   async function listRecent(offset, limit) {
     const r = await authedFetch(
@@ -59,8 +68,8 @@
     return items.map((it) => ({
       id: it.id,
       title: it.title,
-      update_time: typeof it.update_time === "number" ? it.update_time : null,
-      is_temporary: it.is_temporary === true,
+      update_time: toEpochSeconds(it.update_time),
+      is_temporary: isTemp(it),
     }));
   }
 
@@ -83,7 +92,7 @@
     const out = [];
     for (const id of payload.ids || []) {
       const conv = await getConversation(id);
-      if (conv && !conv.is_temporary) out.push(conv);
+      if (conv && !isTemp(conv)) out.push(conv);
     }
     return { conversations: out };
   }
@@ -115,16 +124,19 @@
   }
 
   // ---- 即时采集：捕获页面自身的对话响应（不额外发请求） ----
-  const CONV_RE = /^https:\/\/chatgpt\.com\/backend-api\/conversation\/[a-f0-9-]+/;
+  // 只要单个对话本体（不含 /stream 等子路径）；非对话响应在下面按 mapping 字段再过滤
+  const CONV_RE = /^https:\/\/chatgpt\.com\/backend-api\/conversation\/[\w-]+$/;
   const origFetch = window.fetch;
   window.fetch = async function (...args) {
     const resp = await origFetch.apply(this, args);
     try {
-      const url = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url) || "";
+      const raw = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url) || "";
+      let url = "";
+      try { url = new URL(raw, window.location.href).href.split("?")[0]; } catch (_) { url = ""; } // 页面用的是相对路径
       if (CONV_RE.test(url) && resp.ok) {
         const clone = resp.clone();
         clone.json().then((conv) => {
-          if (conv && conv.conversation_id && !conv.is_temporary) {
+          if (conv && conv.conversation_id && conv.mapping && !isTemp(conv)) {
             post({ conversations: [conv], source_of: "page" });
           }
         }).catch(() => {});

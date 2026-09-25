@@ -9,6 +9,7 @@
     if (event.source !== window) return;
     const msg = event.data;
     if (!msg || msg.source !== "hindsight-adapter") return;
+    if (msg.reqId) return; // 带 reqId 的是补采请求的回复，由下面的 onAck 处理，不当成即时采集
     // adapter → SW（即时采集走这里）
     try {
       chrome.runtime.sendMessage({ type: "adapter-conversations", payload: msg.payload });

@@ -64,17 +64,15 @@ async function runCrawl() {
     const listed = await requestAdapter(tab.id, "crawl", { offset: 0, limit: 28 });
     if (listed.error) throw new Error(listed.error);
     const picks = core.pickForCrawl(listed.conversations, null, excluded, waterline);
-    let crawled = 0;
+    const done = [];
     for (const item of picks) {
-      if (crawled >= core.CRAWL_MAX_PER_ROUND) break; // 节流：单轮上限
+      if (done.length >= core.CRAWL_MAX_PER_ROUND) break; // 节流：单轮上限
       const conv = await fetchConversationVia(tab.id, item.id);
-      if (conv && !core.isTemporary(conv)) {
-        await storeConversation(conv);
-        crawled += 1;
-      }
-      if (crawled < picks.length) await sleep(core.CRAWL_GAP_MS); // 节流：间隔 ≥2s
+      if (conv && !core.isTemporary(conv)) await storeConversation(conv);
+      done.push(item); // 临时聊天也算"已处理"，水位线越过它
+      if (done.length < picks.length) await sleep(core.CRAWL_GAP_MS); // 节流：间隔 ≥2s
     }
-    await db.setMeta("waterline", core.nextWaterline(listed.conversations, waterline));
+    await db.setMeta("waterline", core.nextWaterline(done, waterline));
     await setLastError(null);
     await db.setMeta("last_crawl", Date.now());
   } catch (err) {
@@ -153,6 +151,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 async function storeConversation(conv) {
+  if (!conv || typeof conv.conversation_id !== "string" || !conv.mapping) return;
   const prev = await db.getConversationRecord(conv.conversation_id);
   const updateTime = typeof conv.update_time === "number"
     ? conv.update_time

@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  needsFetch, isTemporary, isExcluded, pickForCrawl, nextWaterline,
+  needsFetch, isTemporary, isExcluded, pickForCrawl, nextWaterline, toEpochSeconds,
   pendingUploads, packBatches, nextRetry, resetRetry, canRetryNow,
   markUploaded, MAX_BODY_BYTES, CRAWL_GAP_MS, CRAWL_MAX_PER_ROUND,
 } from "../lib/core.js";
@@ -54,7 +54,7 @@ test("isExcluded：支持 id 字符串与对象", () => {
   assert.equal(isExcluded("x", null), false);
 });
 
-test("pickForCrawl：按 update_time 降序、过滤排除/水位线、单轮 ≤20", () => {
+test("pickForCrawl：从旧到新、过滤排除/水位线、单轮 ≤20", () => {
   const items = Array.from({ length: 25 }, (_, i) => ({
     id: `c${i}`,
     update_time: 1000 + i,
@@ -64,13 +64,13 @@ test("pickForCrawl：按 update_time 降序、过滤排除/水位线、单轮 �
   const excluded = new Set(["ex"]);
   const picks = pickForCrawl(items, null, excluded, 900);
   assert.equal(picks.length, CRAWL_MAX_PER_ROUND);
-  assert.equal(picks[0].id, "old" === picks[0].id ? "old" : picks[0].id);
-  assert.ok(picks[0].update_time >= picks[picks.length - 1].update_time);
+  assert.equal(picks[0].id, "c0"); // 最旧的先拉
+  assert.ok(picks[0].update_time <= picks[picks.length - 1].update_time);
   assert.ok(!picks.some((p) => p.id === "ex"));
   assert.ok(!picks.some((p) => p.id === "old")); // 低于水位线
 });
 
-test("nextWaterline：取列表最大 update_time，与已拉取无关", () => {
+test("nextWaterline：取本轮实际拉取项的最大 update_time", () => {
   assert.equal(nextWaterline([{ update_time: 5 }, { update_time: 9 }], 7), 9);
   assert.equal(nextWaterline([], 7), 7);
   assert.equal(nextWaterline([{ id: "x" }], null), 0);
@@ -132,4 +132,37 @@ test("节流常量与任务书一致，不得放宽", () => {
   assert.equal(CRAWL_GAP_MS, 2000);
   assert.equal(MAX_BODY_BYTES, 16_000_000);
   assert.ok(MAX_BODY_BYTES < 20_000_000);
+});
+
+test("isTemporary：ChatGPT 当前字段 is_temporary_chat 也跳过", () => {
+  assert.equal(isTemporary({ is_temporary_chat: true }), true);
+  assert.equal(isTemporary({ is_temporary_chat: false }), false);
+});
+
+test("toEpochSeconds：列表接口的无时区 ISO 字符串按 UTC 解析，数字原样", () => {
+  assert.equal(toEpochSeconds(1790318483.184349), 1790318483.184349);
+  assert.ok(Math.abs(toEpochSeconds("2026-09-25T06:41:23.18434") - 1790318483.184) < 0.01);
+  assert.ok(Math.abs(toEpochSeconds("2026-09-25T06:41:23.18434Z") - 1790318483.184) < 0.01);
+  assert.equal(toEpochSeconds(null), null);
+  assert.equal(toEpochSeconds("not a date"), null);
+});
+
+test("pickForCrawl：真实列表形状（ISO 字符串时间、临时聊天）", () => {
+  const items = [
+    { id: "a", update_time: "2026-09-25T06:41:23.18434" },
+    { id: "b", update_time: "2026-09-24T01:00:00" },
+    { id: "t", update_time: "2026-09-25T07:00:00", is_temporary_chat: true },
+  ];
+  const picks = pickForCrawl(items, null, new Set(), null);
+  assert.deepEqual(picks.map((p) => p.id), ["b", "a"]);
+  assert.equal(typeof picks[0].update_time, "number");
+});
+
+test("截断时不跳过：单轮只拉 20 个，水位线只推进到已拉的最大值", () => {
+  const items = Array.from({ length: 28 }, (_, i) => ({ id: `c${i}`, update_time: 1000 + i }));
+  const round1 = pickForCrawl(items, null, new Set(), null);
+  const w1 = nextWaterline(round1, null);
+  const round2 = pickForCrawl(items, null, new Set(), w1);
+  assert.equal(round1.length + round2.length, 28);
+  assert.ok(!round2.some((p) => round1.includes(p)));
 });
