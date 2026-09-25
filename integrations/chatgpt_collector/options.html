@@ -31,6 +31,9 @@
   <label for="cfClientSecret">Cloudflare Access 服务令牌 Client Secret（可选）</label>
   <input type="password" id="cfClientSecret" autocomplete="off">
 
+  <label for="backfillSince">往回补到哪天（可选，YYYY-MM-DD）</label>
+  <input type="text" id="backfillSince" placeholder="例如 2026-09-06：把这天之后更新过的对话都补上；留空只采最新">
+
   <label><input type="checkbox" id="paused"> 暂停采集与上传</label>
 
   <button id="save">保存</button><span id="saved"></span>

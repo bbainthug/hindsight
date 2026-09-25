@@ -9,6 +9,7 @@ chrome.storage.local.get(SETTINGS_KEY).then(({ [SETTINGS_KEY]: s }) => {
   $("cfClientId").value = s.cfClientId || "";
   $("cfClientSecret").value = s.cfClientSecret || "";
   $("paused").checked = Boolean(s.paused);
+  $("backfillSince").value = s.backfillSince || "";
 });
 
 $("save").addEventListener("click", async () => {
@@ -35,6 +36,7 @@ $("save").addEventListener("click", async () => {
       cfClientId: $("cfClientId").value.trim(),
       cfClientSecret: $("cfClientSecret").value.trim(),
       paused: $("paused").checked,
+      backfillSince: $("backfillSince").value.trim(),
       namespace: "main", // 固定 main：与历史导出按消息 ID 去重（任务书硬性要求）
     },
   });

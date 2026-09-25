@@ -11,6 +11,7 @@ const DEFAULT_SETTINGS = {
   cfClientId: "",          // Cloudflare Access 服务令牌（可选，走 Access 时填）
   cfClientSecret: "",
   paused: false,
+  backfillSince: "",       // 往回补的起始日期 YYYY-MM-DD，空 = 只采最新
   namespace: "main",       // 任务书硬性要求：namespace 固定 main，与历史导出去重
 };
 
@@ -61,18 +62,47 @@ async function runCrawl() {
     tab = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
     await waitTabComplete(tab.id);
     await sleep(3000); // 页面初始化
-    const listed = await requestAdapter(tab.id, "crawl", { offset: 0, limit: 28 });
-    if (listed.error) throw new Error(listed.error);
-    const picks = core.pickForCrawl(listed.conversations, null, excluded, waterline);
-    const done = [];
-    for (const item of picks) {
-      if (done.length >= core.CRAWL_MAX_PER_ROUND) break; // 节流：单轮上限
+    const floor = core.parseBackfillSince(settings.backfillSince);
+    const cursor = (await db.getMeta("backfill_cursor")) ?? null;
+    // 列表翻页：直到见到"不需要再往下"的时间（向前采：水位线；往回补：起始日期 / 游标），最多 LIST_MAX_PAGES 页
+    const stopAt = floor != null ? floor : (waterline ?? Infinity);
+    const listedAll = [];
+    for (let page = 0; page < core.LIST_MAX_PAGES; page++) {
+      if (page > 0) await sleep(core.CRAWL_GAP_MS); // 节流：列表翻页同样间隔 ≥2s
+      const listed = await requestAdapter(tab.id, "crawl", {
+        offset: page * core.LIST_PAGE_SIZE, limit: core.LIST_PAGE_SIZE,
+      });
+      if (listed.error) throw new Error(listed.error);
+      const items = listed.conversations || [];
+      listedAll.push(...items);
+      const last = items.length ? core.toEpochSeconds(items[items.length - 1].update_time) : null;
+      if (items.length < core.LIST_PAGE_SIZE || last == null || last <= stopAt) break;
+    }
+    // 向前采的下界：水位线与起始日期取较晚者（首次运行不去拉起始日期之前的对话）
+    const forwardFloor = Math.max(waterline ?? -Infinity, floor ?? -Infinity);
+    const forward = core.pickForCrawl(
+      listedAll, null, excluded, Number.isFinite(forwardFloor) ? forwardFloor : null,
+    );
+    const known = new Map((await db.allConversations()).map((r) => [r.conversation_id, r.update_time]));
+    const backfill = core.pickBackfill(
+      listedAll, excluded, floor, waterline, cursor,
+      core.CRAWL_MAX_PER_ROUND - forward.length, known,
+    );
+    const doneForward = [];
+    const doneBackfill = [];
+    const queue = [...forward.map((i) => [i, doneForward]), ...backfill.map((i) => [i, doneBackfill])];
+    for (let k = 0; k < queue.length; k++) {
+      const [item, doneList] = queue[k];
       const conv = await fetchConversationVia(tab.id, item.id);
       if (conv && !core.isTemporary(conv)) await storeConversation(conv);
-      done.push(item); // 临时聊天也算"已处理"，水位线越过它
-      if (done.length < picks.length) await sleep(core.CRAWL_GAP_MS); // 节流：间隔 ≥2s
+      doneList.push(item); // 临时聊天也算"已处理"，水位线 / 游标越过它
+      if (k < queue.length - 1) await sleep(core.CRAWL_GAP_MS); // 节流：间隔 ≥2s
     }
-    await db.setMeta("waterline", core.nextWaterline(done, waterline));
+    const newWaterline = core.nextWaterline(doneForward, waterline);
+    await db.setMeta("waterline", newWaterline);
+    // 往回补从"首次水位线"开始往下走；第一次还没有游标时，向前采拉到的最早一条就是起点
+    const cursorBase = cursor ?? (doneForward.length ? core.toEpochSeconds(doneForward[0].update_time) : null);
+    await db.setMeta("backfill_cursor", core.nextBackfillCursor(doneBackfill, cursorBase));
     await setLastError(null);
     await db.setMeta("last_crawl", Date.now());
   } catch (err) {

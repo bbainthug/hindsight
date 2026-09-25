@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  needsFetch, isTemporary, isExcluded, pickForCrawl, nextWaterline, toEpochSeconds,
+  needsFetch, isTemporary, isExcluded, pickForCrawl, nextWaterline, toEpochSeconds, pickBackfill, nextBackfillCursor, parseBackfillSince,
   pendingUploads, packBatches, nextRetry, resetRetry, canRetryNow,
   markUploaded, MAX_BODY_BYTES, CRAWL_GAP_MS, CRAWL_MAX_PER_ROUND,
 } from "../lib/core.js";
@@ -165,4 +165,37 @@ test("截断时不跳过：单轮只拉 20 个，水位线只推进到已拉的�
   const round2 = pickForCrawl(items, null, new Set(), w1);
   assert.equal(round1.length + round2.length, 28);
   assert.ok(!round2.some((p) => round1.includes(p)));
+});
+
+test("parseBackfillSince：YYYY-MM-DD 按 UTC 零点，非法为 null", () => {
+  assert.equal(parseBackfillSince("2026-09-06"), Date.UTC(2026, 8, 6) / 1000);
+  assert.equal(parseBackfillSince(""), null);
+  assert.equal(parseBackfillSince("9/6"), null);
+});
+
+test("pickBackfill：只挑起始日期之后、水位线及以下、游标之前的，从新到旧，受名额限制", () => {
+  const items = Array.from({ length: 10 }, (_, i) => ({ id: `c${i}`, update_time: 100 + i }));
+  // floor=101, ceiling=107, cursor=106 → 候选 102..105，从新到旧取 3 个
+  const picks = pickBackfill(items, new Set(), 101, 107, 106, 3);
+  assert.deepEqual(picks.map((p) => p.id), ["c5", "c4", "c3"]);
+  assert.deepEqual(pickBackfill(items, new Set(), null, 107, null, 5), []); // 未设起始日期
+  assert.deepEqual(pickBackfill(items, new Set(), 101, 107, null, 0), []); // 无名额
+});
+
+test("pickBackfill：本地已存且未更新的对话不再重复拉", () => {
+  const items = [{ id: "a", update_time: 105 }, { id: "b", update_time: 104 }];
+  const known = new Map([["a", 105]]);
+  assert.deepEqual(pickBackfill(items, new Set(), 100, 200, null, 5, known).map((p) => p.id), ["b"]);
+});
+
+test("往回补多轮推进：游标逐轮下降，覆盖起始日期后的全部对话且不重复", () => {
+  const items = Array.from({ length: 50 }, (_, i) => ({ id: `c${i}`, update_time: 1000 + i }));
+  let cursor = null;
+  const seen = new Set();
+  for (let round = 0; round < 5; round++) {
+    const picks = pickBackfill(items, new Set(), 1009, 1049, cursor, 20);
+    for (const p of picks) { assert.ok(!seen.has(p.id)); seen.add(p.id); }
+    cursor = nextBackfillCursor(picks, cursor);
+  }
+  assert.equal(seen.size, 40); // 1010..1049
 });

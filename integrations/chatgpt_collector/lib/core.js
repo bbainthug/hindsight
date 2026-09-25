@@ -5,7 +5,9 @@
 export const CRAWL_INTERVAL_MIN = 30;       // 补采轮间隔
 export const UPLOAD_INTERVAL_MIN = 15;      // 上传轮间隔
 export const CRAWL_MAX_PER_ROUND = 20;      // 单轮最多取 20 个对话
-export const CRAWL_GAP_MS = 2000;           // 对话详情请求间隔 ≥ 2 秒
+export const CRAWL_GAP_MS = 2000;           // 对话详情请求间隔 ≥ 2 秒（列表翻页同样适用）
+export const LIST_PAGE_SIZE = 28;           // 列表每页条数（与 ChatGPT 前端一致）
+export const LIST_MAX_PAGES = 10;           // 单轮最多翻 10 页列表
 export const MAX_BODY_BYTES = 16_000_000;   // 单次上传批次上限（服务端 20MB，留余量）
 export const RETRY_MAX_MIN = 60;            // 重试退避上限
 
@@ -134,4 +136,42 @@ export function canRetryNow(state, nowMs) {
 /** 上传成功后标记：记录本次上传覆盖到的 update_time */
 export function markUploaded(record, nowMs) {
   return { ...record, uploaded_update_time: record.update_time, uploaded_at: nowMs ?? Date.now() };
+}
+
+/**
+ * 往回补：挑出 floor < t ≤ ceiling 且严格小于 cursor 的对话，从新到旧，最多 limit 个。
+ * - floor：用户设置的起始日期（epoch 秒），null 表示不往回补；
+ * - ceiling：本轮开始前的水位线（高于它的归"向前采"管），null 表示不设上限；
+ * - cursor：往回补已推进到的最早时间（epoch 秒），null 表示还没开始。
+ */
+export function pickBackfill(remoteItems, excluded, floor, ceiling, cursor, limit, known) {
+  if (floor == null || !(limit > 0)) return [];
+  const already = known instanceof Map ? known : new Map();
+  return (remoteItems || [])
+    .filter((it) => it && typeof it.id === "string" && it.id)
+    .filter((it) => !isExcluded(it, excluded) && !isTemporary(it))
+    .map((it) => ({ ...it, update_time: toEpochSeconds(it.update_time) }))
+    .filter((it) => it.update_time != null && it.update_time > floor)
+    .filter((it) => ceiling == null || it.update_time <= ceiling)
+    .filter((it) => cursor == null || it.update_time < cursor)
+    // 本地已存、且没有更新的对话不再重复拉取
+    .filter((it) => !(already.get(it.id) != null && already.get(it.id) >= it.update_time))
+    .sort((a, b) => b.update_time - a.update_time)
+    .slice(0, limit);
+}
+
+/** 往回补推进后的新游标：本轮往回补实际处理条目里最早的时间。 */
+export function nextBackfillCursor(doneItems, current) {
+  let min = current ?? Infinity;
+  for (const it of doneItems || []) {
+    const t = toEpochSeconds(it?.update_time);
+    if (t != null && t < min) min = t;
+  }
+  return Number.isFinite(min) ? min : (current ?? null);
+}
+
+/** 设置里的日期字符串（YYYY-MM-DD，按 UTC 零点）→ epoch 秒；空或非法返回 null。 */
+export function parseBackfillSince(s) {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s.trim())) return null;
+  return toEpochSeconds(s.trim() + "T00:00:00Z");
 }
