@@ -153,6 +153,42 @@ systemctl --user enable --now hindsight-import.timer
 `MemoryMax=400M`，与 `hindsight-mcp` 读服务并存、WAL 下互不阻塞、不重启服务）；
 成功移 `inbox/done/<source>/`，失败移 `inbox/failed/` 并记日志、不阻塞后续批次。
 导入后如语义索引已存在则增量 reindex（`HINDSIGHT_SEMANTIC_REINDEX=0` 关闭）。
+D-8 后增量 reindex 判定改为 `revision_id + index_version`（`event_revisions`
+正文不可变，不需要任何内容哈希/指纹），另加一层水位短路（高水位 rowid +
+policy_epoch 都没变就整段跳过）；无新数据时实测 ~1.0 s（10 万 revision 合成
+库，此前 ~11–45 s），新增 50 个事件约 10.8 s，都不加载模型。
+
+### 5b. 向量量化转换（D-8，一次性）
+
+VM 的 float 向量表（457 MB）放不进 900 MB 内存的页缓存，hybrid 查询每次都在
+读盘。D-8 把它就地转换为 `int8 量化粗排 + fp32 行表重排`（22 万 chunk 时
+int8 粗排表约 114 MB，float 的 1/4）。转换**不重新 embed**——直接把现有
+float 向量搬进 fp32 表，再流式量化写回 vec0（int8 的量化 scale 是动态的：
+取全库 `127 / max|v|`，不是固定 ×127，见 `docs/unified-retrieval.md`）。
+实测（Mac，30 万 chunk 合成库，本次修复后的代码）：**75.7 s，峰值 RSS
+139 MB**。VM 是 2 vCPU 突发型、CPU 比 Mac 弱，按量级预计 **5–10 分钟**；
+`MemoryMax=450M` 足够（139 MB 峰值 + 系统/连接池基线）。
+
+```bash
+# 1) 停 import timer（转换期间查询返回 index_building，语义暂不可用，
+#    exact 检索不受影响）
+systemctl --user stop hindsight-import.timer
+
+# 2) 转换（先 schema v7 迁移随第一次连接自动应用；--no-vacuum 磁盘紧张时用）
+~/hindsight/.venv/bin/brain --db ~/brain-data/db/brain.sqlite \
+  reindex-semantic --convert --quant int8 --oversample 4
+
+# 3) 验证
+~/hindsight/.venv/bin/brain --db ~/brain-data/db/brain.sqlite doctor   # 语义段显示 quant_type=int8
+curl -s "http://127.0.0.1:8091/api/search?q=测试&mode=hybrid" | head -c 300
+
+# 4) 起 import timer，并把 semantic_default 切回 hybrid
+systemctl --user start hindsight-import.timer
+#   ~/brain-data/config/remote.yaml: profile.semantic_default: exact -> hybrid
+
+# 回滚：重新 float 结构没有就地路径——直接 reindex-semantic --full 全量重建
+# （约 7 小时）；转换失败中断后重跑同一条 --convert 命令即可续跑（幂等）。
+```
 
 **首次追平**：VM 库落后很多时，Mac 用空的导出断点跑一次全量导出再推送即可，
 VM 导入器按消息 ID 幂等去重，不需要传整库。追平批次体积 ≈ 全部会话 JSON

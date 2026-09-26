@@ -35,6 +35,51 @@ personal-brain-mcp --config /absolute/path/unified.yaml
 
 MCP 启动只读数据库，不创建空库、不自动执行迁移。历史导入仍走原有 `brain import-chatgpt`。
 
+## 语义索引的量化与重排（D-8）
+
+语义向量默认存储为 **int8 量化粗排 + fp32 行表重排**（schema v7）：
+
+- 粗排：sqlite-vec `int8[512]` vec0 表（22 万 chunk 时约 114 MB，float 的 1/4）；
+  **动态对称量化**——scale 取全库 `127 / max|v|`（不是固定 ×127：bge-small-zh
+  的分量典型幅值只有 ~1/√512≈0.044，固定 ×127 只用到 int8 动态范围的 ~4%，
+  量化噪声会把粗排排序信号吞掉，实测重合率 0.0，见下面"实测数字"）；
+- 重排：float 原值存普通行表 `revision_chunk_vectors_fp32`（按 `chunk_id`
+  主键），粗排取 top `k×oversample`（默认 4，≤2000）后按主键随机读回，
+  用 **精确 float L2** 重排取前 k。返回的 `distance` 与 `distance_to_cosine`
+  换算全部基于重排后的 float 值——字段语义与量化前完全一致；
+- 量化方式与 oversample 进 `index_version`：参数一变即判定不匹配（提示
+  `--convert` 就地转换，不重嵌）；float 结构（`quant_type=none`）版本与
+  D-1 相同，v6→v7 升级不触发全量重嵌；
+- `brain doctor` 的语义段显示 `quant_type`、`oversample` 与 fp32/量化表大小。
+
+**实测数字**（合成库，`bge-small-zh-v1.5` 真实模型，4000 revision/1.2 万
+chunk——早期用 `HashEmbeddingProvider` 测过一版，那个 provider 没有真实语义
+结构、近邻距离接近均匀，top-10 天然不稳定，不能用来判召回，已弃用；50 个
+互不重复的固定查询，与 float 全量 KNN 的 top-10 重合率）：
+
+| 方案 | oversample | 平均重合率 | 最低重合率 |
+|---|---|---|---|
+| int8 + 重排 | 1 | 0.936 | 0.700 |
+| int8 + 重排 | **4（默认）** | **1.000** | **1.000** |
+| int8 + 重排 | 8 | 1.000 | 1.000 |
+| bit + 重排 | 4 | 0.276 | 0.000 |
+| bit + 重排 | 8 | 0.424 | 0.000 |
+
+结论：int8/×4 已经完美（平均、最低都是 1.0，`8` 没有再带来收益），维持项目
+默认（`DEFAULT_QUANT_TYPE="int8"`、`DEFAULT_OVERSAMPLE=4`）；**bit 量化不
+采用**——即便 oversample 提到 8，平均重合率也只有 0.42，远达不到 ≥0.9 的
+目标，1-bit 量化把幅值信息全部丢掉是根因，14 MB 的体积优势换不回召回质量。
+
+增量 reindex 判定改为 `revision_chunk_state`（`revision_id + index_version`
+→ chunk 数）：`event_revisions` 的正文不可变（改内容会经 `revision_hash`
+派生出新的 `revision_id`，旧行原样保留），所以判定"要不要重嵌"完全不需要
+内容哈希/指纹，只处理新增/变化/失效的 revision；额外加了一层水位短路
+（`event_revisions` 高水位 rowid + `policy_epoch`）：两者都没变时直接跳过
+整套可索引性扫描——合成 10 万 revision 库实测（`HashEmbeddingProvider`，
+判定阶段本身不碰 embedding provider，数字与用哪个 provider 无关）：无新
+数据的增量调用从 ~11–45 s 降到 ~1.0 s，新增 50 个事件约 10.8 s；两种情况
+都不加载真实模型——"不加载模型"指的正是这一步。
+
 ## 消费端约定
 
 1. 默认使用 `mode=exact` 做可追溯的词面检索；需要同义表达扩展时显式使用
