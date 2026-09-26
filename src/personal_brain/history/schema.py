@@ -320,6 +320,49 @@ MIGRATIONS: list[tuple[int, str]] = [
             );
         """,
     ),
+    (
+        7,
+        """
+        -- D-8：向量量化 + 增量索引提速。
+        --
+        -- 1) float 重排表：量化粗排只决定候选顺序，重排必须用 float 余弦
+        --    （distance_to_cosine 换算只对 float L2 成立）。vec0 表存不进
+        --    页缓存（VM 457MB），改为普通行表按 chunk_id 主键存 BLOB，
+        --    重排时按主键随机读几百行，不再全表扫。
+        -- 2) 增量判定表：revision_id + index_version 判定是否需要重嵌，
+        --    替代增量路径对全量 revision 的归一化 + 分块 + LEFT JOIN 计数。
+        --    不存内容哈希/指纹——event_revisions 的正文不可变（改内容会
+        --    经 revision_hash 派生出新的 revision_id，见
+        --    history/store.py::_insert_revision），同一 revision_id 的内容
+        --    永远不变，判定"要不要重嵌"只需要 revision_id 本身 +
+        --    index_version（分块参数已编码在其中），不需要现算任何哈希。
+        --    量化 vec0 表（int8[dim]/bit[dim]）由
+        --    retrieval/semantic_index.ensure_vector_table 按维度与量化类型
+        --    动态创建，不在迁移里写死。
+        CREATE TABLE IF NOT EXISTS revision_chunk_vectors_fp32 (
+            chunk_id  INTEGER PRIMARY KEY REFERENCES revision_chunks(chunk_id),
+            embedding BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS revision_chunk_state (
+            revision_id TEXT PRIMARY KEY,
+            chunk_count INTEGER NOT NULL,
+            index_version TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS semantic_quant_meta (
+            id           INTEGER PRIMARY KEY CHECK (id = 1),
+            quant_type   TEXT NOT NULL CHECK (quant_type IN ('none', 'int8', 'bit')),
+            quant_scale  REAL,
+            oversample   INTEGER NOT NULL
+        );
+        -- 3) 增量短路水位：event_revisions 只增不改（正文不可变，见上），
+        --    MAX(rowid) 不变 = 没有新/变 revision；policy_epoch 不变 = 没有
+        --    撤回/改标签。两者都没变时，reindex_semantic 可以跳过对全量
+        --    revision 的 JOIN+EXISTS 可索引性扫描（合成库 10 万 revision
+        --    实测这一步本身要 ~10s，是"无新数据"增量耗时的主要来源）。
+        ALTER TABLE semantic_index_meta ADD COLUMN last_revision_rowid INTEGER;
+        ALTER TABLE semantic_index_meta ADD COLUMN last_policy_epoch INTEGER;
+        """,
+    ),
 ]
 
 

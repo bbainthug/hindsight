@@ -19,6 +19,7 @@ from synthetic import build_conversation, node, text_message, write_zip
 
 from personal_brain.history.db import connect
 from personal_brain.history.normalization import normalize_with_map
+from personal_brain.history.policy_epoch import bump_policy_epoch
 from personal_brain.importers.importer import ChatGPTImporter
 from personal_brain.policy.labels import label_event
 from personal_brain.policy.withdraw import withdraw_event, withdraw_source
@@ -178,7 +179,14 @@ class TestCleanup:
         assert conn.execute("SELECT COUNT(*) c FROM revision_chunks").fetchone()["c"] == 0
 
     def test_policy_unavailable_cleaned_on_incremental(self, indexed_env):
-        """availability 翻转 → 下一次增量重建把该 revision 的 chunk/向量清掉。"""
+        """availability 翻转 → 下一次增量重建把该 revision 的 chunk/向量清掉。
+
+        真实撤回/改标签路径（policy/withdraw.py、policy/labels.py）都在同一
+        事务内递增 policy_epoch（§7.3 不可妥协的系统级不变量；D-8 的增量短路
+        判定也依赖它）——这里直接改 revision_policy_state 模拟"策略状态翻转"，
+        必须同样递增纪元，否则不是在模拟真实变更路径，而是在制造一个真实系统
+        里不会出现的、纪元与实际策略状态不一致的库。
+        """
         conn, provider, _ = indexed_env
         rid = conn.execute(
             "SELECT revision_id FROM revision_chunks LIMIT 1"
@@ -188,6 +196,7 @@ class TestCleanup:
             " WHERE revision_id = ? AND valid_to IS NULL",
             (rid,),
         )
+        bump_policy_epoch(conn)
         stats = reindex_semantic(conn, provider)
         assert stats["mode"] == "incremental"
         assert conn.execute(
@@ -199,6 +208,7 @@ class TestCleanup:
             " WHERE revision_id = ? AND valid_to IS NULL",
             (rid,),
         )
+        bump_policy_epoch(conn)
         reindex_semantic(conn, provider)
         assert conn.execute(
             "SELECT COUNT(*) c FROM revision_chunks WHERE revision_id = ?", (rid,)

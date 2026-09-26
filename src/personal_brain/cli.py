@@ -596,15 +596,95 @@ def cmd_soak(args, cfg: BrainConfig, as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _semantic_dimension(conn) -> int:
+    """转换目标维度：取索引 meta 的已建维度（不加载模型）。"""
+    from personal_brain.retrieval.semantic_index import semantic_meta
+
+    meta = semantic_meta(conn)
+    if meta is None:
+        raise RuntimeError("语义索引未构建（semantic_index_meta 缺失），无法转换")
+    return int(meta["dimension"])
+
+
 def cmd_reindex_semantic(args, cfg: BrainConfig, as_json: bool) -> int:
-    """D-1：构建/增量更新本地语义索引（可选项未装时给出可操作指引）。"""
+    """D-1/D-8：构建/增量更新本地语义索引；--convert 就地量化（不重嵌）。"""
     import time as _time
 
     from personal_brain.retrieval.embeddings import build_provider
-    from personal_brain.retrieval.semantic_index import reindex_semantic
+    from personal_brain.retrieval.semantic_index import (
+        SemanticConfig,
+        convert_vectors_to_quantized,
+        load_vec_extension,
+        reindex_semantic,
+        semantic_meta,
+        semantic_pending,
+    )
 
     conn = connect(cfg.db_path)
     try:
+        if not load_vec_extension(conn):
+            print(
+                "sqlite-vec 扩展不可用。安装：pip install -e '.[semantic]'"
+                "（或 uv sync --extra semantic）。",
+                file=sys.stderr,
+            )
+            return 2
+        if getattr(args, "convert", False):
+            meta = semantic_meta(conn)
+            if meta is None:
+                print("语义索引未构建（semantic_index_meta 缺失），先跑一次 reindex-semantic。",
+                      file=sys.stderr)
+                return 2
+            try:
+                started = _time.perf_counter()
+                stats = convert_vectors_to_quantized(
+                    conn,
+                    dimension=int(meta["dimension"]),
+                    quant_type=args.quant,
+                    oversample=args.oversample,
+                    vacuum=not args.no_vacuum,
+                )
+            except RuntimeError as exc:
+                print(f"{exc}", file=sys.stderr)
+                return 2
+            stats["wall_s"] = round(_time.perf_counter() - started, 1)
+            stats["db_bytes"] = cfg.db_path.stat().st_size
+            if as_json:
+                print(json.dumps(stats, ensure_ascii=False, indent=2))
+            else:
+                print(
+                    f"向量转换完成：float → {stats['quant_type']}"
+                    f"（oversample={stats['oversample']}）"
+                )
+                print(
+                    f"  chunks={stats['chunks']} index_version={stats['index_version']}"
+                    f" 耗时 {stats['elapsed_s']} s（VACUUM={'否' if args.no_vacuum else '已执行'}）"
+                )
+            return 0
+        # D-8：增量前置判定（不加载模型）——无新数据直接短路。
+        pending = semantic_pending(
+            conn,
+            SemanticConfig(cfg.semantic_model, cfg.semantic_chunk_chars,
+                           cfg.semantic_chunk_overlap),
+        )
+        if pending["action"] == "skip":
+            if as_json:
+                print(json.dumps({"action": "skip", **pending},
+                                 ensure_ascii=False, indent=2))
+            else:
+                print(
+                    f"无待索引内容（扫描 {pending['scanned']} 个可索引版本，"
+                    f"0 新增/0 失效），跳过模型加载。"
+                )
+            return 0
+        if pending["action"] == "convert":
+            print(
+                "变化只在量化方式/oversample：跑 "
+                "`brain reindex-semantic --convert --quant int8|bit`"
+                "（就地转换，不重新 embed，分钟级）。全量重嵌（VM 约 7 小时）不必要。",
+                file=sys.stderr,
+            )
+            return 0
         try:
             provider = build_provider(
                 args.provider,
@@ -622,7 +702,7 @@ def cmd_reindex_semantic(args, cfg: BrainConfig, as_json: bool) -> int:
         except RuntimeError as exc:
             print(f"{exc}", file=sys.stderr)
             return 2
-        if args.provider == "fastembed":
+        if args.provider == "fastembed" and pending["action"] == "full":
             print(
                 f"提示：首次运行会从 HuggingFace 下载模型 {provider.model_id}"
                 "（之后缓存本地、离线使用）；embedding 全程本地计算。",
@@ -633,9 +713,10 @@ def cmd_reindex_semantic(args, cfg: BrainConfig, as_json: bool) -> int:
             stats = reindex_semantic(
                 conn,
                 provider,
-                full=args.full,
+                full=args.full or pending["action"] == "full",
                 chunk_chars=cfg.semantic_chunk_chars,
                 chunk_overlap=cfg.semantic_chunk_overlap,
+                quant_type=pending.get("quant_type", "none"),
             )
         except RuntimeError as exc:
             print(f"{exc}", file=sys.stderr)
@@ -651,6 +732,7 @@ def cmd_reindex_semantic(args, cfg: BrainConfig, as_json: bool) -> int:
             print(
                 f"  模型 {stats['model_id']}（dim={stats['dimension']}）"
                 f" index_version={stats['index_version']}"
+                f" 量化={stats.get('quant_type', 'none')}"
             )
             print(
                 f"  扫描 {stats['revisions_scanned']} 个可索引版本，"
@@ -849,6 +931,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--model", help="覆盖 semantic.model（仅 fastembed）")
     p.add_argument("--cache-dir", help="覆盖 semantic.cache_dir（仅 fastembed）")
+    p.add_argument(
+        "--convert", action="store_true",
+        help="D-8：把现有 float 向量就地转换为量化粗排+fp32 重排（不重新 embed）",
+    )
+    p.add_argument(
+        "--quant", choices=["int8", "bit"], default="int8",
+        help="D-8：量化类型（配合 --convert；int8 ≈113MB/22万，bit ≈14MB）",
+    )
+    p.add_argument(
+        "--oversample", type=int, default=4,
+        help="D-8：粗排候选放大倍数（重排行数 = k×oversample，默认 4）",
+    )
+    p.add_argument(
+        "--no-vacuum", action="store_true",
+        help="D-8：转换后跳过 VACUUM（磁盘紧张时用，空间随写入逐步回收）",
+    )
     p.set_defaults(func=cmd_reindex_semantic)
 
     p = sub.add_parser("bench", help="合成数据性能基准（§9.2：预热 P95，短词单独披露）")
