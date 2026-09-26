@@ -170,24 +170,34 @@ float 向量搬进 fp32 表，再流式量化写回 vec0（int8 的量化 scale 
 `MemoryMax=450M` 足够（139 MB 峰值 + 系统/连接池基线）。
 
 ```bash
-# 1) 停 import timer（转换期间查询返回 index_building，语义暂不可用，
-#    exact 检索不受影响）
+# 1) 停 import timer 和 MCP（旧代码的 MCP 不认识 v7 结构，转换期间不要让它读库）
 systemctl --user stop hindsight-import.timer
+while systemctl --user is-active -q hindsight-import; do sleep 5; done
+systemctl --user stop hindsight-mcp
 
-# 2) 转换（先 schema v7 迁移随第一次连接自动应用；--no-vacuum 磁盘紧张时用）
-~/hindsight/.venv/bin/brain --db ~/brain-data/db/brain.sqlite \
+# 2) 备份（回滚唯一的快速路径；约 30 s / 1.9 GB）
+python3 -c "import sqlite3; s=sqlite3.connect('$HOME/brain-data/db/brain.sqlite'); \
+  d=sqlite3.connect('$HOME/brain-data/backups/brain-pre-d8.sqlite'); s.backup(d)"
+
+# 3) 部署新代码后转换（schema v7 迁移随第一次连接自动应用；--no-vacuum 磁盘紧张时用）。
+#    用 systemd-run 限内存；WorkingDirectory 要写绝对路径（%h 不展开）
+systemd-run --user --unit hindsight-d8-convert -p MemoryMax=600M \
+  --working-directory=$HOME/hindsight \
+  $HOME/hindsight/.venv/bin/brain --db $HOME/brain-data/db/brain.sqlite \
   reindex-semantic --convert --quant int8 --oversample 4
 
-# 3) 验证
+# 4) 验证
 ~/hindsight/.venv/bin/brain --db ~/brain-data/db/brain.sqlite doctor   # 语义段显示 quant_type=int8
-curl -s "http://127.0.0.1:8091/api/search?q=测试&mode=hybrid" | head -c 300
+systemctl --user start hindsight-mcp
+curl -s "http://127.0.0.1:8765/api/search?q=测试&mode=hybrid" | head -c 300
 
-# 4) 起 import timer，并把 semantic_default 切回 hybrid
+# 5) 起 import timer，并把 semantic_default 切回 hybrid 后重启 MCP
 systemctl --user start hindsight-import.timer
-#   ~/brain-data/config/remote.yaml: profile.semantic_default: exact -> hybrid
+#   ~/brain-data/remote.yaml: profiles.remote.semantic_default: exact -> hybrid
 
-# 回滚：重新 float 结构没有就地路径——直接 reindex-semantic --full 全量重建
-# （约 7 小时）；转换失败中断后重跑同一条 --convert 命令即可续跑（幂等）。
+# 回滚：停 MCP，把 backups/brain-pre-d8.sqlite 拷回 db/brain.sqlite（删掉 -wal/-shm），
+# 部署回 D-8 之前的代码。没有备份时只能 reindex-semantic --full 全量重建（约 7 小时）。
+# 转换中断后重跑同一条 --convert 命令即可续跑（幂等）。
 ```
 
 **首次追平**：VM 库落后很多时，Mac 用空的导出断点跑一次全量导出再推送即可，
