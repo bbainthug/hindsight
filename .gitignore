@@ -33,3 +33,4 @@ evals/private/
 /integrations/*
 !/integrations/agent_sync/
 !/integrations/chatgpt_collector/
+!/integrations/gemini_export/
