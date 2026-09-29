@@ -30,13 +30,14 @@
 
 | 项目 | 结果 | 出处 |
 |---|---|---|
-| 测试 | 340 passed（宿主机与容器一致） | `pytest` / `docker compose run --rm test` |
+| 测试 | 426 passed（宿主机，D-8 时；容器内最近一次核对为 340 项时一致） | `pytest` / `docker compose run --rm test` |
 | 性能门 | 10 万条语料预热后各查询 P95 ≤ 1s（实测 0.7–0.9s） | [`docs/evals/benchmark-100k.json`](docs/evals/benchmark-100k.json) |
 | 导入优化 | FTS 写入由全表扫描改按 rowid 更新（O(n²)→O(log n)），10 万条 15 分钟级 → 约 20 秒 | 决策 32 |
 | 并发梯度 | 只读并发 1/2/4/8：P95 = 471 / 507 / 701 / 1171 ms，0 错误 | [`docs/evals/soak-20260915-host.json`](docs/evals/soak-20260915-host.json) |
 | 长稳 soak | 4 并发 × 30 分钟，17,814 次查询，P95 692 ms，RSS 增长 1.2%，8/8 门槛通过 | [`docs/evals/soak-20260915.md`](docs/evals/soak-20260915.md) |
 | 读写同库 | 读侧 P95 抬升（漂移 4.41，未过门槛），如实披露 | [`soak-20260915-host-writer.json`](docs/evals/soak-20260915-host-writer.json) |
-| 我自己的库 | 4 个来源，6.4 万条事件，2023-07 至今；香港一台免费 VM 上常驻副本，端到端同步 20–45 分钟 | — |
+| 语义检索上 1GB 机器（D-8） | 向量表 457 MB 放不进内存 → int8 量化粗排 + fp32 重排：单次 KNN 3.5 s → 0.9 s；recall P95 5.9 s → 1.8 s；真实库 10 个查询转换前后 top-10 重合 1.0；不重新 embed，27.3 万块转换 6.5 分钟 | [`STATUS.md`](STATUS.md) |
+| 我自己的库 | 6 个来源（ChatGPT、Claude Code、Codex、DSH、Hermes、Gemini），约 11.1 万条事件（2026-09-28），2023-07 至今；香港 Azure VM（学生额度，2 vCPU / 1 GB）常驻副本，端到端同步 15–30 分钟 | [`STATUS.md`](STATUS.md) |
 
 ## 几个设计决定
 
