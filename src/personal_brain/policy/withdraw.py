@@ -28,6 +28,13 @@ class WithdrawSummary:
     applied_at: str = ""
 
 
+@dataclass
+class WithdrawBatchSummary:
+    events_affected: int = 0
+    revisions_withdrawn: int = 0
+    applied_at: str = ""
+
+
 def _withdraw_revisions(
     conn: sqlite3.Connection, revision_ids: list[str], now: str
 ) -> int:
@@ -142,5 +149,51 @@ def withdraw_event(
         target_id=event_id,
         revisions_withdrawn=count,
         events_affected=1,
+        applied_at=now,
+    )
+
+
+def withdraw_events(
+    conn: sqlite3.Connection,
+    event_reasons: dict[str, str],
+    *,
+    now: str | None = None,
+) -> WithdrawBatchSummary:
+    """原子撤回一批事件并记录每个事件的原因。
+
+    已经没有可用版本的事件保持幂等，不重复写撤回记录或递增策略纪元。
+    """
+    now = now or utc_now_iso()
+    conn.execute("BEGIN IMMEDIATE")
+    changed_events = 0
+    changed_revisions = 0
+    changed_revision_ids: list[str] = []
+    try:
+        for event_id, reason in event_reasons.items():
+            rows = conn.execute(
+                "SELECT revision_id FROM event_revisions WHERE event_id = ?",
+                (event_id,),
+            ).fetchall()
+            revision_ids = [row["revision_id"] for row in rows]
+            count = _withdraw_revisions(conn, revision_ids, now)
+            if count:
+                changed_events += 1
+                changed_revisions += count
+                changed_revision_ids.extend(revision_ids)
+                conn.execute(
+                    "INSERT INTO withdrawal_audit(event_id, reason, applied_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT(event_id, reason) DO NOTHING",
+                    (event_id, reason, now),
+                )
+        if changed_revision_ids:
+            purge_revision_semantic(conn, changed_revision_ids)
+            bump_policy_epoch(conn)
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
+    return WithdrawBatchSummary(
+        events_affected=changed_events,
+        revisions_withdrawn=changed_revisions,
         applied_at=now,
     )

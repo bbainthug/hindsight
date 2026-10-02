@@ -363,6 +363,19 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE semantic_index_meta ADD COLUMN last_policy_epoch INTEGER;
         """,
     ),
+    (
+        8,
+        """
+        -- D-11：逻辑撤回时保留明确原因，便于审计 agent 注入清理。
+        CREATE TABLE withdrawal_audit (
+            event_id   TEXT NOT NULL REFERENCES events(event_id),
+            reason     TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            PRIMARY KEY (event_id, reason)
+        );
+        CREATE INDEX ix_withdrawal_audit_reason ON withdrawal_audit(reason);
+        """,
+    ),
 ]
 
 
