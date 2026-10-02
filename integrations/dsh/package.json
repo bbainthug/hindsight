@@ -1,0 +1,20 @@
+{
+  "name": "personal-brain-dsh",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness bridge for the read-only Personal Brain local extension catalog.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "skills/"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-mcp-client": "0.1.2-rc.1"
+  }
+}

@@ -34,3 +34,8 @@ evals/private/
 !/integrations/agent_sync/
 !/integrations/chatgpt_collector/
 !/integrations/gemini_export/
+!/integrations/dsh/
+/integrations/dsh/cordis.patch.yml
+
+# DSH 插件的本地索引与记忆数据不属于仓库
+/.memsearch/
