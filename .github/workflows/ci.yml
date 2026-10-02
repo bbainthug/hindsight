@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai                    # 和本机一致，避免日期边界相关的测试因时区不同而失败
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖（含语义检索与远程接入两个可选组）
+        run: uv sync --all-extras
+
+      - name: 代码规范检查
+        run: uv run ruff check .
+
+      - name: 类型检查
+        run: uv run mypy src/personal_brain
+
+      - name: 运行测试
+        run: uv run pytest -q
+
+  collector-js:                            # ChatGPT 采集扩展的纯逻辑测试（Node 内置测试框架，无需安装依赖）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 运行扩展测试
+        run: node --test integrations/chatgpt_collector/tests/*.test.js
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 扫描密钥泄露（全部历史）
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
