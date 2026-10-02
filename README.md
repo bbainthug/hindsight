@@ -7,7 +7,7 @@
 我做它是因为每个 agent 的记忆都是孤岛，而且都是"它觉得该记的"。我想要的是：全量原始历史在
 自己手里，任何 agent 开口前能先查一下我。
 
-> 本地优先 · 只读 MCP（stdio，可选 HTTP）· 不调远程模型 · Python ≥ 3.12 · SQLite FTS5 + sqlite-vec
+> 本地优先 · 只读 MCP（stdio，可选 HTTP）· 检索不调远程模型；事实提炼按需外发已遮蔽上下文 · Python ≥ 3.12 · SQLite FTS5 + sqlite-vec
 
 ## 它能做什么
 
@@ -19,6 +19,10 @@
   带前后文同对话上下文的原文片段（字数预算约束、逐条可回查）；`timeline` 回答"某段时间我在
   忙什么"——按天列出活跃对话的统计轮廓（只统计可见内容，不做摘要）。
   见 [docs/unified-retrieval.md](docs/unified-retrieval.md)。
+- **可审核的事实层**（D-2 v0）：`brain facts extract --dry-run` 先估算请求与 token，再由用户决定是否调用
+  模型；候选逐条带原话证据，经人工审核后才激活。可查看决策时间线，并只更新 `profile.md` 的自动维护标记区。
+  真实提炼会把已遮蔽的上下文发送到用户配置的模型；数据范围、命令与限制见
+  [docs/facts.md](docs/facts.md)。
 - **权限**：服务端绑定 profile；逐结果再授权；"无权限"和"不存在"返回一致；远程 profile 遮蔽
   凭据形态、拒绝敏感标签。撤回是版本化的，不是删行。
 - **接入**：本机 agent 用 stdio MCP；远程用 `--transport http` + 反向代理（我用 Cloudflare Tunnel
@@ -66,6 +70,7 @@ cp config/config.example.yaml config/config.yaml   # 指向你自己的私有数
 brain import-chatgpt <chatgpt-export.zip>            # 幂等导入，事件-版本模型（修订 / 分支 / 冲突保留）
 brain search-history "关键词" --from 2026-01-01      # FTS5 + 中文二元切分；--source / --conversation / --cursor 过滤与 keyset 分页
 brain recent --limit 20                              # 最近事件
+brain facts extract --dry-run                       # 只估算，不调用模型、不写库
 brain eval --suite evals/suites/dev-synthetic.json   # 评测运行器（Recall@10 / 引用解析 / 权限断言）
 brain bench --conversations 500 --messages 200       # 10 万条性能门
 brain soak --mode both --concurrency 4 --duration 1800   # 并发梯度 + 长稳（漂移 / RSS / 完整性门槛）
@@ -123,6 +128,7 @@ Access 配置步骤）。
 - [`docs/phase-b-mcp.md`](docs/phase-b-mcp.md) 权限与只读 MCP
 - [`docs/phase-c-evals.md`](docs/phase-c-evals.md) 评测与规模门槛
 - [`docs/unified-retrieval.md`](docs/unified-retrieval.md) 统一检索
+- [`docs/facts.md`](docs/facts.md) D-2 事实层模型、流程与 CLI
 - [`docs/remote-access.md`](docs/remote-access.md) 远程接入（HTTP transport）
 
 ## 数据与隐私

@@ -18,9 +18,10 @@
 | 存储与导入 | SQLite；事件-版本模型，幂等导入；数据来源见下表 |
 | 检索 | FTS5 中文二元切分 + 原文核对；语义检索（bge-small-zh，int8 量化 + fp32 重排）；RRF 混合 |
 | 工具 | `brain_status` `search_history` `recall` `timeline` `get_recent_events` `get_event`（全部只读） |
+| 事实层 | D-2 v0 本地 CLI（schema v8）；候选经人工审核后激活；未在真实库正式提炼 |
 | 远程 | Azure VM（2 vCPU / 1 GB）+ Cloudflare Tunnel，`https://brain.bbainthug.tech/mcp/<token>`；默认 `semantic_default: hybrid` |
 | 接入方 | ChatGPT 连接器、claude.ai 自定义连接器（网页/手机/Claude Code 同步可用）、DSH 桌面端（本地 stdio 转接器 `integrations/dsh/hindsight_remote_bridge.py`，经 `127.0.0.1:7891` 代理连云端；dsh-mcp-client 的 Node 运行时不走系统代理，直连会被重置，且 Cloudflare 拒绝 Python-urllib UA） |
-| 测试 | 426 项 pytest，ruff / mypy 干净（D-8 时） |
+| 测试 | D-8 时 426 项；D-2 验收全量 pytest、ruff、mypy 与 collector Node 测试通过（2026-10-02） |
 
 ### 数据来源与采集方式
 
