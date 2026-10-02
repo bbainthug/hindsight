@@ -15,3 +15,20 @@ search:
   snippet_chars: 400
   max_text_chars: 8000
   max_scan: 50000
+
+# D-2 事实层提炼（可选）：OpenAI 兼容接口。
+# 密钥只从环境变量读取（api_key_env 指定变量名），不写入任何文件；
+# 未设置环境变量时 brain facts extract 报错，其余功能不受影响。
+facts:
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+  temperature: 0.2
+  timeout_seconds: 120
+  max_segment_chars: 6000      # 分段字符目标；单条超长消息仍可能越限
+  max_output_tokens: 2000
+  budget_tokens: 500000        # 单次提炼预算；估算超出即拒绝执行
+  dedup_threshold: 0.9         # 相近度 ≥ 此值合并为同一主张的新证据
+  conflict_threshold: 0.45     # 相近度 ≥ 此值送 LLM 做关系建议（仅建议）
+  max_gap_seconds: 3600        # 分段时间间隔阈值
+  context_messages: 4          # 切分时携带的有限上下文条数

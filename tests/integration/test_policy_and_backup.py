@@ -177,7 +177,9 @@ class TestBackupRestore:
         check = restore_check(result.backup_dir)
         assert check.integrity == "ok"
         assert check.foreign_key_violations == 0
-        assert check.schema_version == 8
+        from personal_brain.history.schema import MIGRATIONS
+
+        assert check.schema_version == MIGRATIONS[-1][0]  # 全部迁移已应用
         assert check.manifest_ok is True
         assert check.counts["events"] > 0
 
