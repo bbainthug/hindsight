@@ -5,7 +5,7 @@ Facts 在本地 SQLite 中保存经过人工审核的主张及其原话证据。
 ## 模型与边界
 
 - v0 类型：`preference`、`goal`、`decision`、`project_fact`、`open_question`。`behavior_pattern` 暂不支持。
-- `claims` 保存稳定主张身份和生命周期；`claim_revisions` 保存不可变措辞、类型、审核状态和时间；`claim_evidence` 指向确切的事件 revision 与原文跨度；`claim_relations` 保存建议或人工确认的关系；`extraction_runs` 保存输入摘要、配置版本、预算统计；`review_log` 记录人工审核与派生失效。数据库 migration 为 schema v8。
+- `claims` 保存稳定主张身份和生命周期；`claim_revisions` 保存不可变措辞、类型、审核状态和时间；`claim_evidence` 指向确切的事件 revision 与原文跨度；`claim_relations` 保存建议或人工确认的关系；`extraction_runs` 保存输入摘要、配置版本、预算统计；`review_log` 记录人工审核与派生失效。数据库 migration 为 schema v9（D-12：原编号 8 让位给 D-11 的 withdrawal_audit，v8→v9 升级由回归测试覆盖）。
 - 证据跨度以原文字符位置为准，并保存原文片段 SHA-256。发给模型前复用凭据遮蔽；遮蔽保持文本长度，所以模型看到的引用仍可映射回原文。CLI 展示原话时也会再次遮蔽已识别的凭据形态。
 - 提炼输入遵循所选对话路径和当前可用策略状态。owner 发言是唯一可作为 support 的证据；assistant 内容只能帮助理解上下文。assistant-only、无有效证据或引用跨度无法核对的候选会被拒绝。
 - 同类型相近主张达到去重阈值时，新证据合并到现有主张。CLI 优先使用已缓存的本地 FastEmbed 向量模型；模型不可用时退回字符二元组 Jaccard，不下载模型。与 active/candidate 主张相关但未达到去重阈值时，模型可以建议 `same`、`refines`、`supersedes`、`contradicts` 或 `coexists`；建议不会改变任何主张状态，必须由用户裁决。
