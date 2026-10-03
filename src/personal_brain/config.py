@@ -13,6 +13,8 @@ from pathlib import Path
 
 import yaml
 
+from personal_brain.facts.pipeline import FactsConfig, load_facts_config
+
 
 @dataclass
 class SearchLimits:
@@ -43,6 +45,8 @@ class BrainConfig:
     semantic_cache_dir: str | None = None
     semantic_chunk_chars: int = 600
     semantic_chunk_overlap: int = 100
+    # D-2 事实层（密钥只从 facts.api_key_env 指定的环境变量读取）
+    facts: FactsConfig = field(default_factory=FactsConfig)
 
     @staticmethod
     def load(config_path: Path | None) -> BrainConfig:
@@ -91,4 +95,5 @@ class BrainConfig:
             raise ValueError(
                 "semantic.chunk_chars 必须 > 0 且 0 <= chunk_overlap < chunk_chars"
             )
+        cfg.facts = load_facts_config(data.get("facts"))
         return cfg

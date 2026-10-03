@@ -69,10 +69,12 @@ class TestMigrationUpgrade:
 
         upgraded = connect(db)  # 重开走完整迁移（应用迁移 4）
         try:
+            from personal_brain.history.schema import MIGRATIONS
+
             version = upgraded.execute(
                 "SELECT MAX(version) v FROM schema_migrations"
             ).fetchone()["v"]
-            assert version == 8
+            assert version == MIGRATIONS[-1][0]  # 全部迁移已应用
             assert upgraded.execute(
                 "SELECT COUNT(*) c FROM event_revisions_fts"
             ).fetchone()["c"] == 1

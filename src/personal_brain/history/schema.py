@@ -376,6 +376,162 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX ix_withdrawal_audit_reason ON withdrawal_audit(reason);
         """,
     ),
+    (
+        9,
+        """
+        -- D-2：可溯源的个人事实层 v0（设计 §10.1/§10.2/§11.1）。
+        -- （D-12：原编号 8 与 D-11 的 withdrawal_audit 冲突，rebase 时改为 9；
+        --  本地库与 VM 库在 D-11 时已升到 8，v8→v9 升级路径由回归测试覆盖。）
+        --
+        -- claims + claim_revisions：主张与其不可变修订（§10.1 稳定身份 +
+        -- 不可变修订；内容/类型/审核/生命周期状态都挂在修订上，claims 只保留
+        -- 当前指针与聚合时间戳）。v0 的 memory_type 只开
+        -- preference/goal/decision/project_fact/open_question；behavior_pattern 不做。
+        -- scope/sensitivity 标签不落列：设计要求"继承证据标签"，读时经
+        -- claim_evidence → revision_policy_state 实时继承（标注更新立即生效，
+        -- 不产生过期快照；与 §10.1 字段表的偏差已在 docs/facts.md 声明）。
+        --
+        -- claim_evidence：证据边（§10.2）。证据必须指向确切 revision，
+        -- 偏移基于原始文本（与 search_text 的归一化偏移无关），并保存
+        -- 跨度摘要值；role 只开 support（v0 提炼只认 owner 原话，
+        -- assistant 只作上下文不落边）。
+        --
+        -- claim_relations：关系类型 §11.1 全枚举；建议（origin=llm）只是
+        -- 建议，status=confirmed 才生效。自环在约束层禁止，环路在应用层拒绝。
+        --
+        -- extraction_runs：提炼批次与幂等键（§10.4：输入 revision 集合 +
+        -- 分段/提示词/schema 版本 + provider/model 配置）。
+        --
+        -- review_log：人工纠错记录（§11.2：状态迁移带 actor、原因、时间）。
+        CREATE TABLE extraction_runs (
+            run_id               TEXT PRIMARY KEY,
+            extraction_key       TEXT NOT NULL UNIQUE,
+            started_at           TEXT NOT NULL,
+            finished_at          TEXT,
+            status               TEXT NOT NULL DEFAULT 'running'
+                CHECK (status IN ('running', 'completed', 'failed')),
+            since                TEXT,
+            until                TEXT,
+            source               TEXT,
+            provider             TEXT NOT NULL,
+            model                TEXT NOT NULL,
+            prompt_version       TEXT NOT NULL,
+            schema_version       TEXT NOT NULL,
+            segmentation_version TEXT NOT NULL,
+            rule_version         TEXT NOT NULL,
+            input_revision_count INTEGER NOT NULL,
+            segment_count        INTEGER NOT NULL,
+            request_count        INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens        INTEGER NOT NULL DEFAULT 0,
+            completion_tokens    INTEGER NOT NULL DEFAULT 0,
+            candidates_generated INTEGER NOT NULL DEFAULT 0,
+            candidates_rejected  INTEGER NOT NULL DEFAULT 0,
+            notes                TEXT
+        );
+
+        CREATE TABLE claims (
+            claim_id             TEXT PRIMARY KEY,
+            memory_type          TEXT NOT NULL CHECK (memory_type IN
+                ('preference', 'goal', 'decision', 'project_fact', 'open_question')),
+            current_revision_id  TEXT
+                REFERENCES claim_revisions(claim_revision_id)
+                DEFERRABLE INITIALLY DEFERRED,
+            lifecycle_status     TEXT NOT NULL DEFAULT 'candidate'
+                CHECK (lifecycle_status IN
+                       ('candidate', 'active', 'superseded', 'archived', 'withdrawn')),
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        );
+        CREATE INDEX ix_claims_type_lifecycle ON claims(memory_type, lifecycle_status);
+
+        CREATE TABLE claim_revisions (
+            claim_revision_id   TEXT PRIMARY KEY,
+            claim_id            TEXT NOT NULL REFERENCES claims(claim_id),
+            content             TEXT NOT NULL,
+            memory_type         TEXT NOT NULL CHECK (memory_type IN
+                ('preference', 'goal', 'decision', 'project_fact', 'open_question')),
+            assertion_kind      TEXT NOT NULL CHECK (assertion_kind IN
+                ('self_report', 'intention', 'hypothesis',
+                 'quotation', 'external_claim', 'model_inference')),
+            verification_status TEXT NOT NULL DEFAULT 'unverified'
+                CHECK (verification_status IN
+                       ('unverified', 'user_confirmed',
+                        'independently_supported', 'disputed')),
+            review_status       TEXT NOT NULL DEFAULT 'pending'
+                CHECK (review_status IN ('pending', 'approved', 'rejected', 'needs_review')),
+            lifecycle_status    TEXT NOT NULL DEFAULT 'candidate'
+                CHECK (lifecycle_status IN
+                       ('candidate', 'active', 'superseded', 'archived', 'withdrawn')),
+            subject_id          TEXT,
+            context             TEXT,
+            asserted_at         TEXT,
+            valid_from          TEXT,
+            valid_to            TEXT,
+            recorded_at         TEXT NOT NULL,
+            extraction_score    REAL,
+            extraction_run_id   TEXT REFERENCES extraction_runs(run_id),
+            rule_version        TEXT NOT NULL
+        );
+        CREATE INDEX ix_claim_revisions_claim
+            ON claim_revisions(claim_id, recorded_at);
+        CREATE INDEX ix_claim_revisions_review
+            ON claim_revisions(review_status);
+
+        CREATE TABLE claim_evidence (
+            evidence_id       INTEGER PRIMARY KEY,
+            claim_revision_id TEXT NOT NULL REFERENCES claim_revisions(claim_revision_id),
+            revision_id       TEXT NOT NULL REFERENCES event_revisions(revision_id),
+            span_start        INTEGER NOT NULL,
+            span_end          INTEGER NOT NULL,
+            span_sha256       TEXT NOT NULL,
+            role              TEXT NOT NULL DEFAULT 'support'
+                CHECK (role IN ('support', 'contradict', 'context')),
+            support_check     TEXT NOT NULL DEFAULT 'unreviewed'
+                CHECK (support_check IN
+                       ('unreviewed', 'supported', 'insufficient', 'rejected')),
+            check_method      TEXT NOT NULL,
+            check_version     TEXT NOT NULL,
+            checked_at        TEXT NOT NULL,
+            UNIQUE (claim_revision_id, revision_id, span_start, span_end, role)
+        );
+        CREATE INDEX ix_claim_evidence_revision ON claim_evidence(revision_id);
+        CREATE INDEX ix_claim_evidence_crev ON claim_evidence(claim_revision_id);
+
+        CREATE TABLE claim_relations (
+            relation_id   TEXT PRIMARY KEY,
+            from_claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+            to_claim_id   TEXT NOT NULL REFERENCES claims(claim_id),
+            relation_type TEXT NOT NULL CHECK (relation_type IN
+                ('same', 'refines', 'supersedes', 'contradicts', 'coexists', 'unrelated')),
+            status        TEXT NOT NULL DEFAULT 'suggested'
+                CHECK (status IN ('suggested', 'confirmed', 'dismissed')),
+            origin        TEXT NOT NULL CHECK (origin IN ('llm', 'user')),
+            note          TEXT,
+            created_at    TEXT NOT NULL,
+            decided_at    TEXT,
+            CHECK (from_claim_id != to_claim_id),
+            UNIQUE (from_claim_id, to_claim_id, relation_type)
+        );
+        CREATE INDEX ix_claim_relations_from ON claim_relations(from_claim_id);
+        CREATE INDEX ix_claim_relations_to ON claim_relations(to_claim_id);
+
+        CREATE TABLE review_log (
+            review_id         INTEGER PRIMARY KEY,
+            claim_id          TEXT NOT NULL REFERENCES claims(claim_id),
+            claim_revision_id TEXT NOT NULL REFERENCES claim_revisions(claim_revision_id),
+            action            TEXT NOT NULL CHECK (action IN
+                ('approved', 'rejected', 'edited', 'skipped',
+                 'relation_confirmed', 'relation_dismissed',
+                 'needs_review', 'archived')),
+            actor             TEXT NOT NULL,
+            note              TEXT,
+            before_content    TEXT,
+            after_content     TEXT,
+            decided_at        TEXT NOT NULL
+        );
+        CREATE INDEX ix_review_log_claim ON review_log(claim_id, decided_at);
+        """,
+    ),
 ]
 
 

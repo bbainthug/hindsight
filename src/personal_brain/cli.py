@@ -22,6 +22,14 @@ from personal_brain.clean_injected import (
     write_samples,
 )
 from personal_brain.config import BrainConfig
+from personal_brain.facts.cli import (
+    cmd_facts_explain,
+    cmd_facts_export_profile,
+    cmd_facts_extract,
+    cmd_facts_list,
+    cmd_facts_review,
+    cmd_facts_timeline,
+)
 from personal_brain.history.db import connect, connect_readonly
 from personal_brain.history.status import collect_status
 from personal_brain.importers.importer import ChatGPTImporter
@@ -1157,6 +1165,73 @@ def build_parser() -> argparse.ArgumentParser:
                    help="加分项：并发读的同时开一个写进程持续导入小批次")
     p.add_argument("--out", help="报告 JSON 输出路径")
     p.set_defaults(func=cmd_soak)
+
+    # D-2 事实层（本地 CLI；写路径不进 MCP，设计 §11.2）
+    facts_parser = sub.add_parser(
+        "facts", help="D-2：可溯源的个人事实层（提炼/审核/时间线/profile 草稿）"
+    )
+    facts_sub = facts_parser.add_subparsers(dest="facts_command", required=True)
+
+    p = facts_sub.add_parser(
+        "extract", help="从 owner 发言提炼候选事实（先估算，预算门，幂等）"
+    )
+    p.add_argument("--since", help="开始日期 YYYY-MM-DD（默认最近 30 天）")
+    p.add_argument("--until", help="结束日期 YYYY-MM-DD（含）")
+    p.add_argument("--source", help="按账号别名过滤（默认全部来源）")
+    p.add_argument("--budget", type=int, help="单次 token 预算上限（默认取配置）")
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="只分段与估算（请求数/token），不调用模型、不写库",
+    )
+    p.add_argument("--base-url", help="覆盖 facts.base_url（测试用）")
+    p.add_argument("--model", help="覆盖 facts.model")
+    p.set_defaults(func=cmd_facts_extract)
+
+    p = facts_sub.add_parser("review", help="交互式逐条审核候选事实")
+    p.add_argument("--claim", help="非交互：直接处理指定主张")
+    p.add_argument(
+        "--action", choices=["approve", "reject", "skip", "edit"],
+        help="非交互动作：approve/reject/skip/edit（edit 需 --content）",
+    )
+    p.add_argument("--content", help="edit 时的修改后措辞")
+    p.add_argument("--note", help="reject 时的原因")
+    p.add_argument("--relation", help="非交互：裁决指定关系")
+    p.add_argument(
+        "--decision",
+        choices=["supersedes", "coexists", "reject_new", "dismiss"],
+        help="关系裁决（配合 --relation）",
+    )
+    p.set_defaults(func=cmd_facts_review)
+
+    p = facts_sub.add_parser("list", help="列出主张（可按类型/状态过滤）")
+    p.add_argument(
+        "--type", dest="type",
+        help="preference/goal/decision/project_fact/open_question",
+    )
+    p.add_argument(
+        "--status", help="pending/approved/rejected/needs_review 或 lifecycle 值"
+    )
+    p.set_defaults(func=cmd_facts_list)
+
+    p = facts_sub.add_parser("timeline", help="决策时间线（每条可回原话）")
+    p.add_argument("--type", dest="type", default="decision", help="默认 decision")
+    p.add_argument(
+        "--include-superseded", action="store_true", help="包含已被替代的主张"
+    )
+    p.set_defaults(func=cmd_facts_timeline)
+
+    p = facts_sub.add_parser("explain", help="一条主张的全部证据原话")
+    p.add_argument("claim_id", help="主张 ID（可用唯一前缀）")
+    p.set_defaults(func=cmd_facts_explain)
+
+    p = facts_sub.add_parser(
+        "export-profile", help="生成 profile.md 自动维护小节草稿（默认只打印 diff）"
+    )
+    p.add_argument("--out", required=True, help="目标 profile.md 路径")
+    p.add_argument(
+        "--write", action="store_true", help="确认后写入（只替换标记区间）"
+    )
+    p.set_defaults(func=cmd_facts_export_profile)
 
     return parser
 

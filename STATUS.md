@@ -18,9 +18,10 @@
 | 存储与导入 | SQLite；事件-版本模型，幂等导入；数据来源见下表 |
 | 检索 | FTS5 中文二元切分 + 原文核对；语义检索（bge-small-zh，int8 量化 + fp32 重排）；RRF 混合 |
 | 工具 | `brain_status` `search_history` `recall` `timeline` `get_recent_events` `get_event`（全部只读） |
+| 事实层 | D-2 v0 本地 CLI（schema v8）；候选经人工审核后激活；未在真实库正式提炼 |
 | 远程 | Azure VM（2 vCPU / 1 GB）+ Cloudflare Tunnel，`https://brain.bbainthug.tech/mcp/<token>`；默认 `semantic_default: hybrid` |
-| 接入方 | ChatGPT 连接器、claude.ai 自定义连接器（网页/手机/Claude Code 同步可用） |
-| 测试 | 426 项 pytest，ruff / mypy 干净（D-8 时） |
+| 接入方 | ChatGPT 连接器、claude.ai 自定义连接器（网页/手机/Claude Code 同步可用）、DSH 桌面端（本地 stdio 转接器 `integrations/dsh/hindsight_remote_bridge.py`，经 `127.0.0.1:7891` 代理连云端；dsh-mcp-client 的 Node 运行时不走系统代理，直连会被重置，且 Cloudflare 拒绝 Python-urllib UA） |
+| 测试 | D-8 时 426 项；D-2 验收全量 pytest、ruff、mypy 与 collector Node 测试通过（2026-10-02） |
 
 ### 数据来源与采集方式
 
@@ -56,10 +57,13 @@
 
 ## 进行中
 
-- **D-2 事实层 v0**：实现在本地分支 `feat/d2-fact-layer`（3 个提交，510 测试通过，未推送）。合并前必须：
-  ① rebase 到 main，**把 D-2 的 migration 从 8 改为 9**（main 的 8 已被 D-11 的 `withdrawal_audit` 占用，VM 与本地库都已升到 8）；
-  ② 在清理后的本地库重跑 `brain facts extract --dry-run --since 2026-09-03`。按比例粗估约 450 万 tokens（清理前 6400 万），
-  仍超 50 万预算，v0 可能先只提炼部分来源；③ 用户决定模型与预算后再正式提炼。
+- **D-2 事实层 v0**：已 rebase 到 main（D-12），migration 改为 **9**（v8→v9 升级有回归测试）。
+  本地库副本（/tmp，未动真实库）dry-run `--since 2026-09-03`：
+  默认参数 2493 条 owner → 1519 段 → 1520 请求 ≈ **1427 万 tokens**，超预算。
+  收窄参数（`max_owner_chars`/`include_assistant_context`/`max_output_tokens`，本分支新增后两者）：
+  - 单批全来源（owner≤300 字、无 assistant 上下文、段 48k、输出 1200）≈ 63 万，仍超；
+  - **推荐**：同参数按来源分 5 批（每批独立 50 万预算）：claude 35 万 / codex 47 万 / dsh 22 万 / main 10 万 / hermes 4 万，全部入内。
+  待用户选方案与确认预算后正式提炼（模型 DeepSeek，密钥只从环境变量读）。PR #3（CI 绿，未合并）。
 
 ## 已完成（近期）
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from personal_brain.facts.derivation import invalidate_claims_for_revisions
 from personal_brain.history.policy_epoch import bump_policy_epoch
 from personal_brain.history.timeutil import utc_now_iso
 from personal_brain.retrieval.semantic_index import purge_revision_semantic
@@ -94,7 +95,10 @@ def withdraw_source(
                 conn, [r["revision_id"] for r in rows], now
             )
             # §14.2 依赖边 4：撤回与派生索引失效同一事务（D-1 语义向量行）
-            purge_revision_semantic(conn, [r["revision_id"] for r in rows])
+            revision_ids = [r["revision_id"] for r in rows]
+            purge_revision_semantic(conn, revision_ids)
+            # D-2 派生失效：依赖这些 revision 的主张标记 needs_review（同事务）
+            invalidate_claims_for_revisions(conn, revision_ids, now=now)
             conn.execute(
                 "UPDATE sources SET status = 'withdrawn' WHERE source_id = ?",
                 (source_id,),
@@ -134,11 +138,12 @@ def withdraw_event(
             "SELECT revision_id FROM event_revisions WHERE event_id = ?",
             (event_id,),
         ).fetchall()
-        count = _withdraw_revisions(
-            conn, [r["revision_id"] for r in rows], now
-        )
+        revision_ids = [r["revision_id"] for r in rows]
+        count = _withdraw_revisions(conn, revision_ids, now)
         # §14.2 依赖边 4：撤回与派生索引失效同一事务（D-1 语义向量行）
-        purge_revision_semantic(conn, [r["revision_id"] for r in rows])
+        purge_revision_semantic(conn, revision_ids)
+        # D-2 派生失效：依赖这些 revision 的主张标记 needs_review（同事务）
+        invalidate_claims_for_revisions(conn, revision_ids, now=now)
     except BaseException:
         conn.rollback()
         raise
