@@ -57,10 +57,13 @@
 
 ## 进行中
 
-- **D-2 事实层 v0**：实现在本地分支 `feat/d2-fact-layer`（3 个提交，510 测试通过，未推送）。合并前必须：
-  ① rebase 到 main，**把 D-2 的 migration 从 8 改为 9**（main 的 8 已被 D-11 的 `withdrawal_audit` 占用，VM 与本地库都已升到 8）；
-  ② 在清理后的本地库重跑 `brain facts extract --dry-run --since 2026-09-03`。按比例粗估约 450 万 tokens（清理前 6400 万），
-  仍超 50 万预算，v0 可能先只提炼部分来源；③ 用户决定模型与预算后再正式提炼。
+- **D-2 事实层 v0**：已 rebase 到 main（D-12），migration 改为 **9**（v8→v9 升级有回归测试）。
+  本地库副本（/tmp，未动真实库）dry-run `--since 2026-09-03`：
+  默认参数 2493 条 owner → 1519 段 → 1520 请求 ≈ **1427 万 tokens**，超预算。
+  收窄参数（`max_owner_chars`/`include_assistant_context`/`max_output_tokens`，本分支新增后两者）：
+  - 单批全来源（owner≤300 字、无 assistant 上下文、段 48k、输出 1200）≈ 63 万，仍超；
+  - **推荐**：同参数按来源分 5 批（每批独立 50 万预算）：claude 35 万 / codex 47 万 / dsh 22 万 / main 10 万 / hermes 4 万，全部入内。
+  待用户选方案与确认预算后正式提炼（模型 DeepSeek，密钥只从环境变量读）。
 
 ## 已完成（近期）
 
