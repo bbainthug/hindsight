@@ -43,8 +43,14 @@
 | 标签 | `environment_context_block` | 消息开头的完整 `<environment_context>…</environment_context>` | 剥离该块；剩余为空则跳过 |
 | 标签 | `subagent_notification_block` | 消息开头的完整 `<subagent_notification>…</subagent_notification>` | 剥离该块；剩余为空则跳过 |
 | 标签 | `skills_list_block` | 消息开头的完整 `<available_skills>…</available_skills>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `claude_task_notification_block` | 消息开头的完整 `<task-notification>…</task-notification>`（Claude Code 后台任务通知，D-12） | 剥离该块；剩余为空则跳过 |
+| 导入对照 | `codex_imported_from_claude` | `~/.codex/external_agent_session_imports.json` 的 `records[].imported_thread_id`（Codex 桌面版导入的 Claude 会话，原件已由 claude 来源采集；只读该字段，D-12） | 同步时跳过整个会话；存量清理按会话撤回 |
+| 归一化 | `gemini_label_dup` | Gemini 导出把读屏标签"你说"与正文重复副本一起抓进来（形如"你说 X\nX"，D-12） | 撤回旧 owner 事件；导出转换时归一化（见 gemini_export/README） |
 
 标签只剥离消息开头连续出现的完整块；普通正文中提到标签、未闭合标签不会触发。
+`codex_imported_from_claude` 由对照表驱动（默认读取，`--no-codex-import-map` 关闭），
+对照表不存在或读不了时照常工作。`gemini_label_dup` 只作用于 gemini 来源的 owner
+发言，归一化实现 `normalize_gemini_user_text` 同时被 `convert_gemini.py` 用于新导出。
 同步时，剥离后仍有用户文字就只保留剩余文字。对旧库，清理命令只逻辑撤回
 整条都由注入块构成的事件；混有用户文字的旧事件会保留，避免为了清掉注入片段
 而误撤回用户内容。字数按 `raw_text` 的 Unicode 字符数统计。

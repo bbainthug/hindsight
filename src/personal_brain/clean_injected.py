@@ -11,7 +11,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from personal_brain.injected_rules import RULES, InjectionRule, metadata_rule, text_rule
+from personal_brain.injected_rules import (
+    RULES,
+    InjectionRule,
+    codex_imported_conversation_ids,
+    gemini_label_dup_rule,
+    load_imported_thread_ids,
+    metadata_rule,
+    text_rule,
+)
 
 _SESSION_META_MARKER = re.compile(r'"type"\s*:\s*"session_meta"')
 _SENSITIVE_ASSIGNMENT = re.compile(
@@ -87,7 +95,7 @@ def discover_codex_subagent_sessions(sessions_dir: Path) -> tuple[dict[str, str]
 
 def _source_type(namespace: str, conversation_id: str) -> str | None:
     value = namespace.casefold()
-    for source in ("codex", "claude", "dsh"):
+    for source in ("codex", "claude", "dsh", "gemini"):
         if value == source or value.startswith(source + "-") or value.startswith(source + "_"):
             return source
         if conversation_id.startswith(source + "-"):
@@ -150,14 +158,27 @@ def _parse_time(value: str | None) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def load_codex_imported_conversation_ids(
+    path: Path | None = None,
+) -> frozenset[str]:
+    """对照表 → 库内会话 ID 集（只读 imported_thread_id；文件缺失返回空集）。"""
+    return codex_imported_conversation_ids(load_imported_thread_ids(path))
+
+
 def analyze_injected(
     conn: sqlite3.Connection,
     *,
     codex_sessions_dir: Path | None = None,
     sample_size: int = 30,
     now: datetime | None = None,
+    imported_codex_conv_ids: frozenset[str] | None = None,
 ) -> CleanPlan:
-    """只读生成计划；不会改数据库、建迁移或触碰 WAL。"""
+    """只读生成计划；不会改数据库、建迁移或触碰 WAL。
+
+    ``imported_codex_conv_ids``：Codex 桌面版导入的 Claude 会话对照（D-12 B），
+    命中的 codex 会话整体撤回（原因 codex_imported_from_claude）。None 表示
+    不做这项检查。
+    """
     plan = CleanPlan()
     session_rules: dict[str, str] = {}
     if codex_sessions_dir is not None:
@@ -166,10 +187,18 @@ def analyze_injected(
         )
 
     conversation_rules = dict(session_rules)
+    for conversation_id in imported_codex_conv_ids or ():
+        conversation_rules.setdefault(conversation_id, "codex_imported_from_claude")
     direct_rules: dict[str, str] = {}
     for row in _owner_rows(conn):
         source_type = _source_type(row["source"], row["conversation_id"])
         if source_type is None:
+            continue
+        if source_type == "gemini":
+            # gemini 不走 codex/claude/dsh 的注入规则；只查导出缺陷（D-12 C）
+            rule = gemini_label_dup_rule(_body(row))
+            if rule is not None:
+                direct_rules[row["event_id"]] = rule.name
             continue
         rule = text_rule(source_type, _body(row))
         if rule is None:

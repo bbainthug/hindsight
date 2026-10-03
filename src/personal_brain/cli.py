@@ -16,7 +16,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from personal_brain.backup import backup, restore_check
-from personal_brain.clean_injected import analyze_injected, write_samples
+from personal_brain.clean_injected import (
+    analyze_injected,
+    load_codex_imported_conversation_ids,
+    write_samples,
+)
 from personal_brain.config import BrainConfig
 from personal_brain.history.db import connect, connect_readonly
 from personal_brain.history.status import collect_status
@@ -449,8 +453,16 @@ def cmd_clean_injected(args, cfg: BrainConfig, as_json: bool) -> int:
             if args.codex_sessions_dir and not args.no_codex_session_metadata
             else None
         )
+        imported_ids = (
+            frozenset()
+            if args.no_codex_import_map
+            else load_codex_imported_conversation_ids()
+        )
         plan = analyze_injected(
-            conn, codex_sessions_dir=sessions_dir, sample_size=args.sample_size
+            conn,
+            codex_sessions_dir=sessions_dir,
+            sample_size=args.sample_size,
+            imported_codex_conv_ids=imported_ids,
         )
         sample_file = None
         sample_withdrawn = sample_retained = 0
@@ -503,6 +515,7 @@ def cmd_clean_injected(args, cfg: BrainConfig, as_json: bool) -> int:
                 "rule_stats": rule_stats,
                 "recent_30_days": recent,
                 "codex_sessions_dir": str(sessions_dir) if sessions_dir else None,
+                "codex_import_map": not args.no_codex_import_map,
                 "codex_sessions_seen": plan.codex_sessions_seen,
                 "codex_subagent_sessions": plan.codex_subagent_sessions,
                 "sample_file": str(sample_file) if sample_file else None,
@@ -1059,6 +1072,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-codex-session-metadata",
         action="store_true",
         help="不扫描 Codex session_meta 文件",
+    )
+    p.add_argument(
+        "--no-codex-import-map",
+        action="store_true",
+        help=(
+            "不读取 Codex 导入对照表（~/.codex/"
+            "external_agent_session_imports.json，只读其 imported_thread_id 字段）"
+        ),
     )
     p.add_argument("--sample-file", help="dry-run 时将正文前缀抽样写到指定路径")
     p.add_argument("--sample-size", type=int, default=30, help="每类抽样数，默认 30")

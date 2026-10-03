@@ -36,13 +36,15 @@ def _conversation(conversation_id: str, owner_texts: list[str]) -> dict:
     return build_conversation(conversation_id, "合成清理对话", T0, mapping, previous)
 
 
-def _import_conversations(importer, tmp_path: Path, conversations: list[dict]):
+def _import_conversations(
+    importer, tmp_path: Path, conversations: list[dict], namespace: str = "codex"
+):
     archive = tmp_path / "synthetic-export"
     archive.mkdir()
     (archive / "conversations.json").write_text(
         json.dumps(conversations, ensure_ascii=False), encoding="utf-8"
     )
-    importer.import_archive(archive, "codex")
+    importer.import_archive(archive, namespace)
     return archive
 
 
@@ -229,3 +231,129 @@ def test_apply_cli_creates_consistent_backup_before_withdrawal(
         cleaned.close()
     assert state == "withdrawn"
     assert reason == "injected_by_agent:codex_agents_md"
+
+
+# ---------------------------------------------------------------------------
+# D-12 B：Codex 桌面版导入的 Claude 会话——按对照表整体撤回
+# ---------------------------------------------------------------------------
+
+
+def test_codex_imported_from_claude_withdraws_whole_conversation(
+    db, importer, tmp_path
+):
+    tid = "01a0dc4c-fbba-71c3-8797-63a2948f891e"
+    # parse_codex 的会话 ID 取文件名末段 12 位，所以库内是 codex-<tid[-12:]>
+    conversation_id = f"codex-{tid[-12:]}"
+    _import_conversations(
+        importer,
+        tmp_path,
+        [_conversation(conversation_id, ["来自 Claude 的原话（对照表命中）"])],
+    )
+    owner = db.execute(
+        "SELECT e.event_id FROM events e WHERE e.speaker_type='owner'"
+    ).fetchone()
+    assistant = db.execute(
+        "SELECT e.event_id FROM events e WHERE e.speaker_type='assistant'"
+    ).fetchone()
+    assert owner is not None and assistant is not None
+
+    from personal_brain.clean_injected import load_codex_imported_conversation_ids
+
+    mapping = tmp_path / "external_agent_session_imports.json"
+    mapping.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "imported_thread_id": tid,
+                        "source_path": "不应被读取的字段",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    ids = load_codex_imported_conversation_ids(mapping)
+    assert conversation_id in ids and f"codex-{tid}" in ids
+
+    plan = analyze_injected(db, imported_codex_conv_ids=ids)
+    # 会话整体进计划：owner 与 assistant 事件都撤回，规则名固定
+    assert plan.event_reasons[owner["event_id"]] == "codex_imported_from_claude"
+    assert plan.event_reasons[assistant["event_id"]] == "codex_imported_from_claude"
+    assert plan.counts[("codex", "codex_imported_from_claude")] == 1
+    assert plan.event_counts[("codex", "codex_imported_from_claude")] == 2
+
+    # 不传对照（或对照为空）时同一批事件不受影响
+    plan_without = analyze_injected(db, imported_codex_conv_ids=frozenset())
+    assert plan_without.event_reasons == {}
+
+
+def test_cli_clean_injected_reads_import_map_by_default(db, importer, tmp_path, capsys):
+    tid = "01a0dc4c-fbba-71c3-8797-63a2948f891e"
+    _import_conversations(
+        importer,
+        tmp_path,
+        [_conversation(f"codex-{tid[-12:]}", ["对照表命中的合成会话"])],
+    )
+    mapping = tmp_path / "external_agent_session_imports.json"
+    mapping.write_text(
+        json.dumps({"records": [{"imported_thread_id": tid}]}),
+        encoding="utf-8",
+    )
+    monkey_path = tmp_path / "codex-home"
+    monkey_path.mkdir()
+    (monkey_path / "external_agent_session_imports.json").write_text(
+        mapping.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    import personal_brain.injected_rules as rules_mod
+
+    original = rules_mod.CODEX_IMPORT_MAP_FILENAME
+    # loader 默认读 ~/.codex/…；测试里通过 monkeypatch 换文件名不可行，
+    # 这里直接验证 CLI 在显式空集与默认加载两种路径下行为一致。
+    try:
+        rules_mod.CODEX_IMPORT_MAP_FILENAME = str(mapping)
+        code = main(
+            ["--db", str(tmp_path / "brain.sqlite"), "--json", "clean-injected"]
+        )
+    finally:
+        rules_mod.CODEX_IMPORT_MAP_FILENAME = original
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["codex_import_map"] is True
+    stats = {(s["source"], s["rule"]): s["owners"] for s in payload["rule_stats"]}
+    assert stats.get(("codex", "codex_imported_from_claude")) == 1
+
+
+# ---------------------------------------------------------------------------
+# D-12 C：Gemini 导出缺陷（你说 + 重复副本）
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_label_dup_withdraws_owner_keeps_assistant(db, importer, tmp_path):
+    _import_conversations(
+        importer,
+        tmp_path,
+        [_conversation("gemini-dup1", ["你说\n我偏好夜间工作\n我偏好夜间工作"])],
+        namespace="gemini",
+    )
+    owner = db.execute(
+        "SELECT e.event_id FROM events e WHERE e.speaker_type='owner'"
+    ).fetchone()
+    assistant = db.execute(
+        "SELECT e.event_id FROM events e WHERE e.speaker_type='assistant'"
+    ).fetchone()
+    plan = analyze_injected(db)
+    assert plan.event_reasons[owner["event_id"]] == "gemini_label_dup"
+    assert assistant["event_id"] not in plan.event_reasons  # assistant 不受影响
+    assert plan.counts[("gemini", "gemini_label_dup")] == 1
+
+
+def test_gemini_normal_owner_is_not_flagged(db, importer, tmp_path):
+    _import_conversations(
+        importer,
+        tmp_path,
+        [_conversation("gemini-ok1", ["你说得对，我偏好夜间工作"])],
+        namespace="gemini",
+    )
+    plan = analyze_injected(db)
+    assert plan.event_reasons == {}

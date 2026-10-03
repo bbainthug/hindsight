@@ -190,6 +190,20 @@ RULES: tuple[InjectionRule, ...] = (
         tag="local-command-stdout",
     ),
     InjectionRule(
+        name="claude_task_notification_block",
+        kind="tag",
+        sources=("claude",),
+        action="strip_block",
+        note=(
+            "Claude Code 后台任务完成通知：以 <task-notification> 块作为 user "
+            "消息注入（D-12 A）。开头完整块，剥离后为空则跳过；正文中提到"
+            "该标签不触发。"
+        ),
+        positive="<task-notification>Bash finished: pytest all green</task-notification>",
+        negative="帮我写一个解析 task-notification 标签的脚本",
+        tag="task-notification",
+    ),
+    InjectionRule(
         name="recommended_plugins_block",
         kind="tag",
         sources=("codex", "claude", "dsh"),
@@ -228,6 +242,22 @@ RULES: tuple[InjectionRule, ...] = (
         positive="<available_skills>skill-a</available_skills>",
         negative="用户文档中出现 available_skills 作为字段名",
         tag="available_skills",
+    ),
+    InjectionRule(
+        # kind="normalize"：不参与前缀/标签匹配循环，只由 gemini 专用路径
+        # （normalize_gemini_user_text / gemini_label_dup_rule）调用；
+        # 放进表里是为了与其它规则一样接受正反例测试与 rule_descriptions()。
+        name="gemini_label_dup",
+        kind="normalize",
+        sources=("gemini",),
+        action="skip_message",
+        note=(
+            "Gemini 网页导出把读屏标签“你说”连同正文的另一份完整副本一起抓进"
+            "来（D-12 C）：形如“你说 X\\nX”。归一化去掉开头标签与完全重复的"
+            "副本；正文本身不重复或仅正文中提到“你说”时保持原样。"
+        ),
+        positive="你说\n我偏好夜间工作\n我偏好夜间工作",
+        negative="你说得对，我偏好夜间工作",
     ),
 )
 
@@ -324,3 +354,125 @@ def clean_user_text(
     if rule is not None:
         return None, rule
     return cleaned, None
+
+
+# ---------------------------------------------------------------------------
+# Codex 桌面版导入的外部会话对照表（D-12 B）
+# ---------------------------------------------------------------------------
+
+CODEX_IMPORT_MAP_FILENAME = "external_agent_session_imports.json"
+
+codex_imported_from_claude = InjectionRule(
+    name="codex_imported_from_claude",
+    # kind="import_map"：由对照表驱动（不走 metadata_path / 前缀 / 标签匹配
+    # 循环），放进表里只为统一文档与测试。
+    kind="import_map",
+    sources=("codex",),
+    action="skip_session",
+    note=(
+        "Codex 桌面版会把 Claude Code 会话导入成自己的线程（对照表 "
+        "~/.codex/external_agent_session_imports.json 的 records[].imported_thread_id"
+        " 是 Codex 线程 ID；原会话已由 claude 来源采集）。按对照表整体跳过/"
+        "撤回 codex 侧重复会话；清理时只读 imported_thread_id 字段（D-12 B）。"
+    ),
+    positive="01a0dc4c-fbba-71c3-8797-63a2948f891e",
+    negative="019d7be0-2685-7e32-9cb4-cd9560cf7be6",  # 不在对照表中的普通线程
+)
+
+
+def load_imported_thread_ids(path: Any = None) -> frozenset[str]:
+    """读取 Codex 导入对照表，只取 ``records[].imported_thread_id`` 字段。
+
+    文件不存在、不可读或格式不对时返回空集——调用方（采集与清理）照常
+    工作，不报错。除 imported_thread_id 外不读任何字段。
+    """
+    import json
+    from pathlib import Path
+
+    if path is None:
+        path = Path.home() / ".codex" / CODEX_IMPORT_MAP_FILENAME
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(records, list):
+        return frozenset()
+    ids = {
+        record["imported_thread_id"]
+        for record in records
+        if isinstance(record, dict) and isinstance(record.get("imported_thread_id"), str)
+    }
+    return frozenset(ids)
+
+
+def codex_imported_conversation_ids(thread_ids: frozenset[str]) -> frozenset[str]:
+    """把对照表线程 ID 展开成库里的 conversation_id 形态。
+
+    parse_codex 生成会话 ID 时取文件名末段（``rollout-<ts>-<uuid>.jsonl``
+    的 ``rsplit('-', 1)``，即 uuid 最后一段 12 位十六进制），所以已入库的
+    重复会话是 ``codex-<tid 最后 12 位>``；两种形态都匹配，兼容将来把会话
+    ID 修正为完整 uuid 的情况。
+    """
+    ids: set[str] = set()
+    for tid in thread_ids:
+        ids.add(f"codex-{tid}")
+        ids.add(f"codex-{tid[-12:]}")
+    return frozenset(ids)
+
+
+# ---------------------------------------------------------------------------
+# Gemini 导出缺陷的归一化（D-12 C）
+# ---------------------------------------------------------------------------
+
+_GEMINI_LABEL_RE = re.compile(r"\A\s*你说")
+
+
+def _drop_exact_duplicate(text: str) -> str | None:
+    """``text == A + 空白分隔 + A`` 时返回 A，否则 None。"""
+    for sep_len in (1, 2):
+        half = (len(text) - sep_len) / 2
+        if half <= 0 or half != int(half):
+            continue
+        n = int(half)
+        head, sep, tail = text[:n], text[n : n + sep_len], text[n + sep_len :]
+        if head == tail and sep.strip() == "":
+            return head
+    return None
+
+
+def normalize_gemini_user_text(text: str) -> str:
+    """去掉 Gemini 导出抓进来的读屏标签“你说”与其后完全重复的正文副本。
+
+    已知缺陷形态是“你说 X\\nX”（export_gemini.js 的 textContent 把页面上
+    给读屏软件的隐藏标签和正文另一份副本一起读了出来）。规则：
+
+    - 标签独占一行（“你说\\nX”或“你说：\\nX”）：剥掉标签行；若其余部分
+      恰为完全重复的两份，再去掉副本。
+    - 标签与正文同排（“你说 X\\nX”）：只有整段完全重复时才剥——避免误删
+      “你说得对……”这类正常发言。
+    - 只有标签没有正文、或正文不重复且标签不独行：保持原样。
+    """
+    leading = text.lstrip()
+    if not _GEMINI_LABEL_RE.match(leading):
+        return text
+    rest = leading[2:]
+    own_line = re.match(r"[：:][ \t]*\n|[ \t]*\n", rest)
+    if own_line is not None:
+        body = rest[own_line.end() :].strip()
+        deduped = _drop_exact_duplicate(body)
+        return deduped if deduped is not None else body
+    deduped = _drop_exact_duplicate(rest.strip())
+    if deduped is not None:
+        return deduped
+    if not rest.strip():
+        return ""
+    return text
+
+
+def gemini_label_dup_rule(text: str) -> InjectionRule | None:
+    """owner 正文命中 gemini_label_dup 缺陷时返回该规则，否则 None。"""
+    if normalize_gemini_user_text(text) != text:
+        return _RULE_BY_NAME["gemini_label_dup"]
+    return None
