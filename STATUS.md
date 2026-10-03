@@ -63,7 +63,7 @@
   收窄参数（`max_owner_chars`/`include_assistant_context`/`max_output_tokens`，本分支新增后两者）：
   - 单批全来源（owner≤300 字、无 assistant 上下文、段 48k、输出 1200）≈ 63 万，仍超；
   - **推荐**：同参数按来源分 5 批（每批独立 50 万预算）：claude 35 万 / codex 47 万 / dsh 22 万 / main 10 万 / hermes 4 万，全部入内。
-  待用户选方案与确认预算后正式提炼（模型 DeepSeek，密钥只从环境变量读）。
+  待用户选方案与确认预算后正式提炼（模型 DeepSeek，密钥只从环境变量读）。PR #3（CI 绿，未合并）。
 
 ## 已完成（近期）
 
