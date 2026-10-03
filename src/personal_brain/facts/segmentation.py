@@ -97,8 +97,16 @@ def build_segments(
     max_segment_chars: int = 6000,
     max_gap_seconds: int = 3600,
     context_messages: int = 4,
+    max_owner_chars: int | None = None,
+    include_assistant_context: bool = True,
 ) -> tuple[list[Segment], int]:
-    """构造提炼分段；返回 (分段列表, 路径未知被跳过的对话数)。"""
+    """构造提炼分段；返回 (分段列表, 路径未知被跳过的对话数)。
+
+    ``max_owner_chars``：跳过超过该长度的 owner 发言（粘贴的长日志/JD 等，
+    D-12 预算收窄用）；assistant 上下文不受影响。None 表示不过滤。
+    ``include_assistant_context``：False 时 assistant 消息整体不进分段
+    （只提炼 owner 原话；预算收窄用，默认 True 保持上下文）。
+    """
     rows = _candidate_rows(
         conn, since=since, until=until, account_namespace=account_namespace
     )
@@ -109,6 +117,15 @@ def build_segments(
     for row in rows:
         if row["event_id"] not in selected_events:
             # 只取所选路径上的消息（§10.3 选中路径；路径未知对话整段跳过）
+            continue
+        if not include_assistant_context and row["speaker_type"] == "assistant":
+            continue
+        if (
+            max_owner_chars is not None
+            and row["speaker_type"] == "owner"
+            and len(row["raw_text"]) > max_owner_chars
+        ):
+            # 超长粘贴文本不作为提炼输入（含其 support 资格）
             continue
         by_conv.setdefault(row["conversation_id"], []).append(row)
 

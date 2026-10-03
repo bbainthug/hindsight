@@ -32,3 +32,5 @@ facts:
   conflict_threshold: 0.45     # 相近度 ≥ 此值送 LLM 做关系建议（仅建议）
   max_gap_seconds: 3600        # 分段时间间隔阈值
   context_messages: 4          # 切分时携带的有限上下文条数
+  # max_owner_chars: 500       # 跳过超过该长度的 owner 发言（超长粘贴文本，预算收窄用）
+  # include_assistant_context: false  # 分段不携带 assistant 消息（预算收窄用，默认 true）

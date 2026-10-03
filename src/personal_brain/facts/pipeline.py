@@ -80,6 +80,13 @@ class FactsConfig:
     conflict_threshold: float = 0.45
     max_gap_seconds: int = 3600
     context_messages: int = 4
+    # 跳过超过该长度的 owner 发言（粘贴的长日志/JD 等）：None 表示不过滤。
+    # v0 用于预算收窄（D-12）：提炼"关于我的事实"时超长粘贴文本边际价值低，
+    # 过滤是可配置、可逆的（默认关闭）。
+    max_owner_chars: int | None = None
+    # 分段是否携带 assistant 消息作上下文。默认携带（质量更好）；
+    # 预算收窄时可关闭（真实库实测 assistant 上下文占输入字符的绝大部分）。
+    include_assistant_context: bool = True
 
     def validate(self) -> None:
         if not self.base_url.strip() or not self.model.strip() or not self.api_key_env.strip():
@@ -96,6 +103,8 @@ class FactsConfig:
             raise ValueError("facts.budget_tokens 必须 > 0")
         if self.max_gap_seconds < 0 or self.context_messages < 0:
             raise ValueError("facts.max_gap_seconds/context_messages 不能为负数")
+        if self.max_owner_chars is not None and self.max_owner_chars < 1:
+            raise ValueError("facts.max_owner_chars 必须是正整数或 null")
         if not (0.0 < self.dedup_threshold <= 1.0):
             raise ValueError("facts.dedup_threshold 必须在 (0, 1]")
         if not (0.0 <= self.conflict_threshold < self.dedup_threshold):
@@ -163,6 +172,8 @@ def load_facts_config(data: dict | None) -> FactsConfig:
         "conflict_threshold": "conflict_threshold",
         "max_gap_seconds": "max_gap_seconds",
         "context_messages": "context_messages",
+        "max_owner_chars": "max_owner_chars",
+        "include_assistant_context": "include_assistant_context",
     }
     for key, attr in mapping.items():
         if key in data and data[key] is not None:
@@ -222,6 +233,8 @@ def estimate_extraction(
         max_segment_chars=cfg.max_segment_chars,
         max_gap_seconds=cfg.max_gap_seconds,
         context_messages=cfg.context_messages,
+        max_owner_chars=cfg.max_owner_chars,
+        include_assistant_context=cfg.include_assistant_context,
     )
     revision_ids = segment_fingerprint_ids(segments)
     requests = len(segments) + (1 if segments else 0)  # 关系建议至多一批

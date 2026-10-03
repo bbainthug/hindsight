@@ -127,3 +127,44 @@ def test_withdrawn_revision_excluded(db, importer):
     texts = [m.text for seg in segments for m in seg.messages]
     assert not any("讨厌所有会议" in t for t in texts)
     assert any("喜欢短会" in t for t in texts)
+
+
+def test_max_owner_chars_skips_long_owner_keeps_context(db, importer):
+    long_text = "粘贴的超长日志。" + "x" * 3000
+    conv = linear_conversation(
+        "conv-cap", "收窄",
+        [
+            ("c1", "user", long_text, T0),
+            ("c2", "assistant", "助手回复上下文。", T0 + 30),
+            ("c3", "user", "短发言：我偏好异步沟通。", T0 + 60),
+        ],
+    )
+    import_conversations(importer, [conv])
+    segments, _ = build_segments(db, since=None, until=None, max_owner_chars=500)
+    owners = [m.text for seg in segments for m in seg.messages
+              if m.speaker_type == "owner"]
+    assert owners == ["短发言：我偏好异步沟通。"]  # 超长 owner 被跳过
+    contexts = [m.text for seg in segments for m in seg.messages
+                if m.speaker_type == "assistant"]
+    assert contexts == ["助手回复上下文。"]  # assistant 上下文保留
+    # 默认不过滤
+    segments, _ = build_segments(db, since=None, until=None)
+    owners = [m.text for seg in segments for m in seg.messages
+              if m.speaker_type == "owner"]
+    assert any("粘贴的超长日志" in t for t in owners)
+
+
+def test_include_assistant_context_false_drops_assistant(db, importer):
+    conv = linear_conversation(
+        "conv-noasst", "无上下文",
+        [
+            ("n1", "user", "我决定换笔记本键盘布局。", T0),
+            ("n2", "assistant", "助手的话不进分段。", T0 + 30),
+        ],
+    )
+    import_conversations(importer, [conv])
+    segments, _ = build_segments(
+        db, since=None, until=None, include_assistant_context=False
+    )
+    texts = [m.text for seg in segments for m in seg.messages]
+    assert texts == ["我决定换笔记本键盘布局。"]

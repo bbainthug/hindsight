@@ -17,7 +17,7 @@ Facts 在本地 SQLite 中保存经过人工审核的主张及其原话证据。
 
 `--dry-run` 通过只读连接读取本地库，分段和估算，不应用待执行的 schema migration、不创建批次、不写 Facts 表、不创建 LLM 客户端，也不读取 API key。估算包括每段提炼请求和最多一批关系建议，输入侧为字符数启发式估算并为最多 20 对关系预留空间，输出侧按每请求配置的最大输出 token 数计算。它用于判断量级，不等同于提供方计费 tokenizer 的精确用量。
 
-默认配置示例使用 OpenAI 兼容的 DeepSeek 接口。模型 URL、模型名、温度、超时、分段上限、输出上限与预算可在 `config/config.yaml` 的 `facts:` 段设置；`api_key_env` 只指定环境变量名，密钥仅从该环境变量读取。也可在命令行用 `--base-url` 和 `--model` 覆盖接口与模型。正式提炼会把已遮蔽的 owner/assistant 上下文发送到配置的外部模型；执行前应由用户选定提供方和预算。
+默认配置示例使用 OpenAI 兼容的 DeepSeek 接口。模型 URL、模型名、温度、超时、分段上限、输出上限、预算、`context_messages`（切分时携带的上下文条数）、`max_owner_chars`（跳过超过该长度的 owner 发言，如粘贴的长日志；预算收窄用，默认关闭）与 `include_assistant_context`（分段是否携带 assistant 消息，关闭可大幅省预算，默认开启）可在 `config/config.yaml` 的 `facts:` 段设置；`api_key_env` 只指定环境变量名，密钥仅从该环境变量读取。也可在命令行用 `--base-url` 和 `--model` 覆盖接口与模型。正式提炼会把已遮蔽的 owner/assistant 上下文发送到配置的外部模型；执行前应由用户选定提供方和预算。
 
 成功批次以实际输入 revision 集合、分段规则、提示词/schema/规则版本及模型配置组成幂等键。完成批次不会重复请求；相同键的失败批次可重试；相同键已有运行中的批次会拒绝并发启动。
 
