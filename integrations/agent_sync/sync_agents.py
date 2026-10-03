@@ -33,7 +33,15 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from personal_brain.injected_rules import clean_user_text, metadata_rule
+try:
+    from personal_brain.injected_rules import clean_user_text, metadata_rule
+except ImportError:
+    # launchd 部署副本用系统 Python 运行：injected_rules.py 与本文件同目录（仅依赖标准库）
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from injected_rules import (  # type: ignore[import-not-found,no-redef]
+        clean_user_text,
+        metadata_rule,
+    )
 
 HOME = Path.home()
 BRAIN_HOME = Path(os.environ.get("BRAIN_HOME", HOME / ".local/share/personal-brain")).expanduser()
