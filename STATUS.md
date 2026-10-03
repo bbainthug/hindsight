@@ -71,12 +71,22 @@
     （副本无 personal_brain 包时从同目录导入规则表）；旧版留 `sync_agents.py.bak-20261003`。
   - VM 清理时用的 Codex 子 agent 识别，来自 Mac 上 633 个会话文件的精简 `session_meta`（仅 id 与 source）。
 
+## 已完成（近期）
+
+- **D-12 三个数据质量修复**（2026-10-03，分支 `fix/data-quality-2`，待合并）：
+  规则表新增 `claude_task_notification_block`（Claude Code 后台任务通知）、
+  `codex_imported_from_claude`（Codex 导入对照表去重：同步跳过 + 存量整会话撤回，
+  只读 `imported_thread_id` 字段）、`gemini_label_dup`（"你说"+重复副本归一化，
+  转换器与存量清理共用实现）。真实库 /tmp 副本 dry-run（只读）：三条规则分别命中
+  78 / 791 owner（36,292 事件）/ 2,234 owner；抽样在 /tmp/d12_sample.md。
+  **尚未 --apply**：存量撤回与新 Gemini 数据重导等用户确认后执行。
+  launchd 副本需同步 `sync_agents.py` 与 `injected_rules.py` 两个文件。
+
 ## 下一步 / 暂缓（用户决定"先用用看"）
 
-- **D-11 遗留**：Claude Code 的 `<task-notification>` 后台任务通知仍被当作 owner 发言，需补一条规则；
-  Codex 桌面版会导入 Claude Code 会话，导致同一批 Claude 对话在 claude 与 codex 两个来源各有一份（如 20 条续写摘要），待去重。
-- **Gemini 导出缺陷**：每条用户发言带页面隐藏标签"你说"且正文重复一遍（`export_gemini.js` 抓到了读屏标签），
-  需修导出与转换，并撤回重导已入库的 gemini owner 发言。
+- **D-12 待用户确认**：`clean-injected --apply`（先自动备份）撤回三条规则命中的存量；
+  Gemini 修好转换后重新导出导入（会产生新事件，旧 owner 发言由 `gemini_label_dup` 撤回）；
+  `export_gemini.js` 在确认真实页面隐藏元素结构后修本体。
 - **D-9**：宽泛词 exact 检索在 VM 上 3–7 s。嫌慢再立项。
 - **D-10（候选）**：采集 claude.ai 网页/App 对话（先试官方数据导出 + 导入器）。
 - **候选**：存工具调用摘要（只存工具名 + 命令，不存输出，过脱敏），用于"我上次部署跑了哪些命令"。
