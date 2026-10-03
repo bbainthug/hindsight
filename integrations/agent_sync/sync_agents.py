@@ -34,17 +34,40 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 try:
-    from personal_brain.injected_rules import clean_user_text, metadata_rule
+    from personal_brain.injected_rules import (
+        clean_user_text,
+        codex_imported_conversation_ids,
+        load_imported_thread_ids,
+        metadata_rule,
+    )
 except ImportError:
     # launchd 部署副本用系统 Python 运行：injected_rules.py 与本文件同目录（仅依赖标准库）
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from injected_rules import (  # type: ignore[import-not-found,no-redef]
         clean_user_text,
+        codex_imported_conversation_ids,
+        load_imported_thread_ids,
         metadata_rule,
     )
 
 HOME = Path.home()
 BRAIN_HOME = Path(os.environ.get("BRAIN_HOME", HOME / ".local/share/personal-brain")).expanduser()
+
+# Codex 桌面版导入的 Claude 会话对照表（D-12 B）：imported_thread_id 命中的
+# 会话整体跳过（原件已由 claude 来源采集）。对照表不存在/读不了时照常采集。
+_imported_thread_ids: frozenset[str] | None = None
+
+
+def imported_thread_ids() -> frozenset[str]:
+    global _imported_thread_ids
+    if _imported_thread_ids is None:
+        _imported_thread_ids = load_imported_thread_ids()
+    return _imported_thread_ids
+
+
+def imported_codex_conversation_ids() -> frozenset[str]:
+    return codex_imported_conversation_ids(imported_thread_ids())
+
 BRAIN_CLI = (
     os.environ.get("BRAIN_CLI") or shutil.which("brain") or str(BRAIN_HOME / "venv/bin/brain")
 )
@@ -124,6 +147,14 @@ class Conv:
 
 
 def parse_codex(path: Path) -> dict:
+    # D-12 B：Codex 桌面版导入的 Claude Code 会话（对照表 imported_thread_id
+    # 命中）整体跳过——原件已由 claude 来源采集，避免同批对话两份。
+    if (
+        path.stem[-36:] in imported_thread_ids()
+        or f"codex-{path.stem.rsplit('-', 1)[-1]}"
+        in imported_codex_conversation_ids()
+    ):
+        return {}
     uuid = path.stem.split("-", 0)[-1][-36:] if "-" in path.stem else path.stem
     uuid = path.stem.rsplit("-", 1)[-1]  # rollout-<ts>-<uuid>.jsonl 取末段 uuid
     conv = Conv(f"codex-{uuid}", "")

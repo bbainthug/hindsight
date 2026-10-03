@@ -12,7 +12,12 @@ import pytest
 from personal_brain.injected_rules import (
     RULES,
     clean_user_text,
+    codex_imported_conversation_ids,
+    codex_imported_from_claude,
+    gemini_label_dup_rule,
+    load_imported_thread_ids,
     metadata_rule,
+    normalize_gemini_user_text,
     prefix_rule,
     strip_leading_blocks,
     text_rule,
@@ -33,6 +38,16 @@ def test_every_rule_has_a_positive_and_negative_example(rule):
     if rule.kind == "session_metadata":
         assert metadata_rule(source, rule.positive).name == rule.name
         assert metadata_rule(source, rule.negative) is None
+    elif rule.kind == "import_map":
+        # 对照表规则：正例（导入线程）两种会话 ID 形态都命中，反例不命中
+        ids = codex_imported_conversation_ids(frozenset({rule.positive}))
+        assert f"codex-{rule.positive}" in ids
+        assert f"codex-{rule.positive[-12:]}" in ids
+        assert f"codex-{rule.negative}" not in ids
+        assert codex_imported_from_claude.name == rule.name
+    elif rule.kind == "normalize":
+        assert gemini_label_dup_rule(rule.positive) is rule
+        assert gemini_label_dup_rule(rule.negative) is None
     elif rule.kind == "prefix":
         assert prefix_rule(source, rule.positive).name == rule.name
         assert prefix_rule(source, rule.negative) is None
@@ -181,3 +196,122 @@ def test_mixed_tag_block_removes_injection_and_keeps_user_suffix():
     assert clean_user_text(
         "dsh", "<system-reminder>内部提示</system-reminder>\n这是我的问题"
     ) == ("这是我的问题", None)
+
+
+# ---------------------------------------------------------------------------
+# D-12 A：Claude Code 后台任务通知
+# ---------------------------------------------------------------------------
+
+
+def test_claude_task_notification_block_is_dropped_entirely():
+    text = "<task-notification>Bash: pytest 45 passed</task-notification>"
+    assert clean_user_text("claude", text) == (None, text_rule("claude", text))
+    assert text_rule("claude", text).name == "claude_task_notification_block"
+
+
+def test_claude_task_notification_keeps_trailing_user_text():
+    cleaned, rule = clean_user_text(
+        "claude",
+        "<task-notification>后台任务完成</task-notification>\n继续刚才的话题",
+    )
+    assert cleaned == "继续刚才的话题"
+    assert rule is None
+
+
+def test_task_notification_mention_in_middle_is_kept():
+    text = "帮我写个脚本解析 task-notification 通知"
+    assert clean_user_text("claude", text) == (text, None)
+
+
+# ---------------------------------------------------------------------------
+# D-12 B：Codex 导入对照表
+# ---------------------------------------------------------------------------
+
+
+def test_load_imported_thread_ids_reads_only_that_field(tmp_path):
+    path = tmp_path / "map.json"
+    path.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "imported_thread_id": "01a0dc4c-fbba-71c3-8797-63a2948f891e",
+                        "source_path": "/Users/x/.claude/projects/p/s1.jsonl",
+                        "title": "不应被读取的字段",
+                        "content_sha256": "de-ad-beef",
+                    },
+                    {"imported_thread_id": None},  # 非字符串：忽略
+                    "not-a-dict",  # 坏记录：忽略
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_imported_thread_ids(path) == frozenset(
+        {"01a0dc4c-fbba-71c3-8797-63a2948f891e"}
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "not json", '{"records": "wrong-type"}', '{"other": 1}', "[]"],
+)
+def test_load_imported_thread_ids_tolerates_broken_files(tmp_path, content):
+    path = tmp_path / "map.json"
+    path.write_text(content, encoding="utf-8")
+    assert load_imported_thread_ids(path) == frozenset()
+
+
+def test_load_imported_thread_ids_missing_file(tmp_path):
+    assert load_imported_thread_ids(tmp_path / "nope.json") == frozenset()
+
+
+def test_parse_codex_skips_imported_claude_session(tmp_path, monkeypatch):
+    tid = "01a0dc4c-fbba-71c3-8797-63a2948f891e"
+    monkeypatch.setattr(sync_agents, "_imported_thread_ids", frozenset({tid}))
+    path = tmp_path / f"rollout-2026-09-26T14-00-27-{tid}.jsonl"
+    _write_codex(path, "这是被 Codex 导入的 Claude 会话内容")
+    assert sync_agents.parse_codex(path) == {}
+
+
+def test_parse_codex_keeps_session_not_in_map(tmp_path, monkeypatch):
+    tid = "01a0dc4c-fbba-71c3-8797-63a2948f891e"
+    monkeypatch.setattr(sync_agents, "_imported_thread_ids", frozenset({tid}))
+    other = "019d7be0-2685-7e32-9cb4-cd9560cf7be6"
+    path = tmp_path / f"rollout-2026-04-11T17-29-40-{other}.jsonl"
+    _write_codex(path, "普通 Codex 会话：我想讨论简历", source={"cli": "codex"})
+    parsed = sync_agents.parse_codex(path)
+    assert _message_text(parsed, "user") == ["普通 Codex 会话：我想讨论简历"]
+
+
+# ---------------------------------------------------------------------------
+# D-12 C：Gemini 读屏标签与重复副本
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_normalizes_label_with_duplicated_copy():
+    assert normalize_gemini_user_text("你说\n我偏好夜间工作\n我偏好夜间工作") == "我偏好夜间工作"
+    assert normalize_gemini_user_text("你说 我偏好夜间工作\n我偏好夜间工作") == "我偏好夜间工作"
+    assert normalize_gemini_user_text("你说我偏好夜间工作\n我偏好夜间工作") == "我偏好夜间工作"
+    assert normalize_gemini_user_text("你说：\n我偏好夜间工作\n我偏好夜间工作") == "我偏好夜间工作"
+
+
+def test_gemini_label_stripped_even_without_duplicate():
+    # 标签独占一行时无条件剥掉（缺陷形态之一），正文保留
+    assert normalize_gemini_user_text("你说\n我偏好夜间工作") == "我偏好夜间工作"
+
+
+def test_gemini_normalizer_does_not_touch_normal_text():
+    assert normalize_gemini_user_text("你说得对，我偏好夜间工作") == "你说得对，我偏好夜间工作"
+    no_dup = "我偏好夜间工作\n我偏好夜间工作"
+    assert normalize_gemini_user_text(no_dup) == no_dup  # 无标签：重复行也不删
+    assert normalize_gemini_user_text("讨论：你说 该方案可行") == "讨论：你说 该方案可行"
+    assert normalize_gemini_user_text("你说") == ""
+    assert normalize_gemini_user_text("") == ""
+
+
+def test_gemini_label_dup_rule_flags_only_defect():
+    assert gemini_label_dup_rule("你说\nX\nX") is not None
+    assert gemini_label_dup_rule("你说\nX") is not None
+    assert gemini_label_dup_rule("你说得对") is None
+    assert gemini_label_dup_rule("X\nX") is None

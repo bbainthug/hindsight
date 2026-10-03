@@ -28,6 +28,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent_sync"))
 from sync_agents import Conv  # noqa: E402
 
+try:
+    from personal_brain.injected_rules import normalize_gemini_user_text
+except ImportError:  # 脱离仓库 venv 运行时，从仓库源码目录加载同一实现
+    import importlib.util as _ilu
+
+    _spec = _ilu.spec_from_file_location(
+        "injected_rules",
+        Path(__file__).resolve().parent.parent.parent
+        / "src/personal_brain/injected_rules.py",
+    )
+    assert _spec is not None and _spec.loader is not None
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    normalize_gemini_user_text = _mod.normalize_gemini_user_text
+
 
 def _clean(s: str) -> str:
     """页面 textContent 偶尔把 emoji 拆成孤立代理项：成对的拼回原字符，落单的换成 U+FFFD。"""
@@ -46,6 +61,9 @@ def convert(export: dict) -> list[dict]:
         for i, t in enumerate(turns):
             text = _clean((t.get("text") or "").strip())
             role = t.get("role")
+            if role == "user":
+                # D-12 C：去掉导出抓进来的读屏标签“你说”与完全重复的正文副本
+                text = normalize_gemini_user_text(text)
             digest = hashlib.sha1(f"{role}\x00{text}".encode()).hexdigest()[:12]
             epoch = (float(base) + i) if isinstance(base, (int, float)) else None
             conv.add(epoch, role, text, f"{i}:{digest}")
