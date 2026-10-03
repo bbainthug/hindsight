@@ -33,6 +33,16 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+try:
+    from personal_brain.injected_rules import clean_user_text, metadata_rule
+except ImportError:
+    # launchd 部署副本用系统 Python 运行：injected_rules.py 与本文件同目录（仅依赖标准库）
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from injected_rules import (  # type: ignore[import-not-found,no-redef]
+        clean_user_text,
+        metadata_rule,
+    )
+
 HOME = Path.home()
 BRAIN_HOME = Path(os.environ.get("BRAIN_HOME", HOME / ".local/share/personal-brain")).expanduser()
 BRAIN_CLI = (
@@ -118,6 +128,7 @@ def parse_codex(path: Path) -> dict:
     uuid = path.stem.rsplit("-", 1)[-1]  # rollout-<ts>-<uuid>.jsonl 取末段 uuid
     conv = Conv(f"codex-{uuid}", "")
     session_start = None
+    skip_session = False
     for idx, line in enumerate(path.open(encoding="utf-8", errors="replace")):
         try:
             d = json.loads(line)
@@ -126,6 +137,12 @@ def parse_codex(path: Path) -> dict:
         ts = _epoch(d.get("timestamp"))
         if session_start is None and ts:
             session_start = ts
+        if d.get("type") == "session_meta":
+            payload = d.get("payload") or {}
+            rule = metadata_rule("codex", payload) if isinstance(payload, dict) else None
+            if rule is not None and rule.action == "skip_session":
+                skip_session = True
+            continue
         if d.get("type") != "response_item":
             continue
         p = d.get("payload", {})
@@ -133,9 +150,17 @@ def parse_codex(path: Path) -> dict:
             continue
         role = p.get("role")
         text = _text_of(p.get("content"))
+        if role == "user":
+            text, rule = clean_user_text("codex", text)
+            if rule is not None and rule.action == "skip_session":
+                skip_session = True
+            if text is None:
+                continue
         if role == "user" and not conv.title:
             conv.title = "codex: " + text[:38]
         conv.add(ts, role, text, f"{uuid}:{idx}")
+    if skip_session:
+        return {}
     if not conv.title:
         conv.title = f"codex {datetime.fromtimestamp(session_start or 0, UTC):%Y-%m-%d}"
     return conv.finish()
@@ -156,7 +181,10 @@ def parse_dsh(path: Path) -> dict:
         elif t == "session/title":
             title = (data.get("title") or "").strip()
         elif t == "user/message":
-            conv.add(ts, "user", _text_of(data.get("content")), str(data.get("id") or d.get("seq")))
+            text = _text_of(data.get("content"))
+            text, _ = clean_user_text("dsh", text, data)
+            if text is not None:
+                conv.add(ts, "user", text, str(data.get("id") or d.get("seq")))
         elif t == "assistant/message":
             m = data.get("message") or {}
             conv.add(ts, "assistant", _text_of(m.get("content")), str(m.get("id") or d.get("seq")))
@@ -176,6 +204,7 @@ def parse_claude(path: Path) -> dict:
     conv = None
     seen = False
     first_user = ""
+    skip_session = False
     for idx, line in enumerate(path.open(encoding="utf-8", errors="replace")):
         if not line.strip():
             continue
@@ -184,15 +213,26 @@ def parse_claude(path: Path) -> dict:
         except json.JSONDecodeError:
             continue
         t = d.get("type")
-        if t not in ("user", "assistant") or d.get("isSidechain"):
+        if t not in ("user", "assistant"):
             continue
         msg = d.get("message") or {}
         role = msg.get("role") or t
         if role not in ("user", "assistant"):
             continue
+        rule = metadata_rule("claude", d)
+        if rule is not None:
+            if rule.action == "skip_session":
+                skip_session = True
+                continue
+            if rule.action == "skip_message":
+                continue
         text = _text_of(msg.get("content"))
         if not text:
             continue
+        if role == "user":
+            text, _ = clean_user_text("claude", text)
+            if text is None:
+                continue
         if conv is None:
             conv = Conv(f"claude-{d.get('sessionId') or path.stem}", "")
         ts = _epoch(d.get("timestamp"))
@@ -200,6 +240,8 @@ def parse_claude(path: Path) -> dict:
             first_user = text
         conv.add(ts, role, text, str(d.get("uuid") or f"{path.stem}:{idx}"))
         seen = True
+    if skip_session:
+        return {}
     if not seen or conv is None:
         return {}
     if first_user:

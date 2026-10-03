@@ -16,12 +16,13 @@ from dataclasses import asdict
 from pathlib import Path
 
 from personal_brain.backup import backup, restore_check
+from personal_brain.clean_injected import analyze_injected, write_samples
 from personal_brain.config import BrainConfig
-from personal_brain.history.db import connect
+from personal_brain.history.db import connect, connect_readonly
 from personal_brain.history.status import collect_status
 from personal_brain.importers.importer import ChatGPTImporter
 from personal_brain.policy.labels import label_event, label_source
-from personal_brain.policy.withdraw import withdraw_event, withdraw_source
+from personal_brain.policy.withdraw import withdraw_event, withdraw_events, withdraw_source
 from personal_brain.retrieval.search import (
     QueryTooBroad,
     SearchFilters,
@@ -116,6 +117,50 @@ def _emit_human(data: dict) -> None:
             f"manifest={'ok' if data['manifest_ok'] else 'MISMATCH'}"
         )
         print(f"计数: {json.dumps(data['counts'], ensure_ascii=False)}")
+    elif kind == "clean_injected":
+        mode = "apply" if data["applied"] else "dry-run（只读）"
+        print(f"agent 注入清理: {mode}")
+        print(
+            f"将撤回 owner 发言 {data['owner_count']} 条 / {data['owner_chars']} 字；"
+            f"影响事件 {data['event_count']} 条"
+        )
+        if data["codex_sessions_dir"]:
+            print(
+                f"Codex session_meta: 扫描 {data['codex_sessions_seen']} 个文件，"
+                f"识别 {data['codex_subagent_sessions']} 个子 agent 会话"
+            )
+        if data["rule_stats"]:
+            print("按来源 / 规则（owner 条数 / 字数 / 受影响事件）:")
+            for row in data["rule_stats"]:
+                print(
+                    f"  {row['source']} / {row['rule']}: {row['owners']} / "
+                    f"{row['chars']} / {row['events']}"
+                )
+        print("最近 30 天各来源 owner 发言（当前 → 预期，条数 / 字数）:")
+        for source, values in data["recent_30_days"].items():
+            current = values["current"]
+            expected = values["expected"]
+            print(
+                f"  {source}: {current['count']} / {current['chars']} → "
+                f"{expected['count']} / {expected['chars']}"
+                + (
+                    f"（另有未知时间 {values['unknown_time']} 条）"
+                    if values["unknown_time"]
+                    else ""
+                )
+            )
+        if data.get("sample_file"):
+            print(
+                f"抽样文件: {data['sample_file']} "
+                f"（撤回 {data['sample_withdrawn']} 条、保留 {data['sample_retained']} 条）"
+            )
+        if data.get("backup_dir"):
+            print(f"一致性备份: {data['backup_dir']}")
+        if data.get("applied_summary"):
+            print(
+                f"已逻辑撤回 {data['applied_summary']['events_affected']} 个事件，"
+                f"{data['applied_summary']['revisions_withdrawn']} 个版本"
+            )
     elif kind == "event":
         print(json.dumps(data["event"], ensure_ascii=False, indent=2))
     else:
@@ -378,6 +423,99 @@ def cmd_backup(args, cfg: BrainConfig, as_json: bool) -> int:
         as_json,
     )
     return 0
+
+
+def cmd_clean_injected(args, cfg: BrainConfig, as_json: bool) -> int:
+    """默认只读 dry-run；--apply 自动先做一致性备份。"""
+    if args.apply and args.sample_file:
+        print("--sample-file 只用于 dry-run 核对", file=sys.stderr)
+        return 2
+    if args.sample_size < 1:
+        print("--sample-size 必须大于 0", file=sys.stderr)
+        return 2
+    backup_result = None
+    if args.apply:
+        backup_result = backup(
+            cfg.db_path,
+            cfg.backup_dir,
+            archive_dir=cfg.archive_dir,
+        )
+        conn = connect(cfg.db_path)
+    else:
+        conn = connect_readonly(cfg.db_path)
+    try:
+        sessions_dir = (
+            Path(args.codex_sessions_dir).expanduser()
+            if args.codex_sessions_dir and not args.no_codex_session_metadata
+            else None
+        )
+        plan = analyze_injected(
+            conn, codex_sessions_dir=sessions_dir, sample_size=args.sample_size
+        )
+        sample_file = None
+        sample_withdrawn = sample_retained = 0
+        if args.sample_file:
+            sample_file = Path(args.sample_file).expanduser()
+            sample_withdrawn, sample_retained = write_samples(
+                plan, sample_file, sample_size=args.sample_size
+            )
+        applied_summary = None
+        if args.apply:
+            from dataclasses import asdict
+
+            applied_summary = asdict(
+                withdraw_events(
+                    conn,
+                    {
+                        event_id: f"injected_by_agent:{rule_name}"
+                        for event_id, rule_name in plan.event_reasons.items()
+                    },
+                )
+            )
+        rule_stats = [
+            {
+                "source": source,
+                "rule": rule,
+                "owners": plan.counts[(source, rule)],
+                "chars": plan.chars[(source, rule)],
+                "events": plan.event_counts[(source, rule)],
+            }
+            for source, rule in sorted(set(plan.counts) | set(plan.event_counts))
+        ]
+        recent = {
+            source: {
+                "current": {"count": current[0], "chars": current[1]},
+                "expected": {
+                    "count": plan.recent_expected[source][0],
+                    "chars": plan.recent_expected[source][1],
+                },
+                "unknown_time": plan.recent_unknown.get(source, 0),
+            }
+            for source, current in sorted(plan.recent_current.items())
+        }
+        _emit(
+            {
+                "kind": "clean_injected",
+                "applied": bool(args.apply),
+                "owner_count": plan.owner_count,
+                "owner_chars": plan.owner_chars,
+                "event_count": len(plan.event_reasons),
+                "rule_stats": rule_stats,
+                "recent_30_days": recent,
+                "codex_sessions_dir": str(sessions_dir) if sessions_dir else None,
+                "codex_sessions_seen": plan.codex_sessions_seen,
+                "codex_subagent_sessions": plan.codex_subagent_sessions,
+                "sample_file": str(sample_file) if sample_file else None,
+                "sample_withdrawn": sample_withdrawn,
+                "sample_retained": sample_retained,
+                "backup_dir": str(backup_result.backup_dir) if backup_result else None,
+                "applied_summary": applied_summary,
+            },
+            as_json,
+        )
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_restore_check(args, cfg: BrainConfig, as_json: bool) -> int:
@@ -907,6 +1045,24 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("backup", help="一致性备份（快照 + Raw 归档 + manifest）")
     p.add_argument("--dest")
     p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("clean-injected", help="逻辑撤回 agent 自动注入的 owner 假发言")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="只读预览（默认）")
+    mode.add_argument("--apply", action="store_true", help="先做一致性备份，再逻辑撤回")
+    p.add_argument(
+        "--codex-sessions-dir",
+        default=str(Path.home() / ".codex/sessions"),
+        help="只读取 session_meta 行以回溯子 agent 会话（默认 ~/.codex/sessions）",
+    )
+    p.add_argument(
+        "--no-codex-session-metadata",
+        action="store_true",
+        help="不扫描 Codex session_meta 文件",
+    )
+    p.add_argument("--sample-file", help="dry-run 时将正文前缀抽样写到指定路径")
+    p.add_argument("--sample-size", type=int, default=30, help="每类抽样数，默认 30")
+    p.set_defaults(func=cmd_clean_injected)
 
     p = sub.add_parser("restore-check", help="校验备份可用性")
     p.add_argument("backup_path")

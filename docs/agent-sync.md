@@ -14,6 +14,57 @@
 只采 `user` / `assistant` 正文；工具调用、系统提示、思考过程不进库。
 每个来源在库里是独立的 `source`（`--source codex` 等），检索时可按来源过滤。
 
+## 过滤规则
+
+解析器和 `brain clean-injected` 共用 `personal_brain.injected_rules.RULES` 规则表。
+只检查明确的会话/消息元数据、固定前缀和完整标签块；不按消息长度判断。
+所以用户自己粘贴的长日志、代码和 JD 会保留。规则正反例由
+`tests/unit/test_injected_rules.py` 遍历整张表验证。
+
+| 类型 | 规则名 | 识别方式 | 处理方式 |
+|---|---|---|---|
+| 会话元数据 | `codex_subagent_source` | `session_meta.payload.source.subagent` 存在（guardian、thread_spawn 等） | 跳过整个会话；存量清理按会话撤回 |
+| 会话元数据 | `claude_sidechain` | Claude Code JSONL `isSidechain: true` | 跳过整个会话 |
+| 会话元数据 | `claude_is_meta` | Claude Code JSONL `isMeta: true` | 跳过该消息 |
+| 会话元数据 | `claude_compact_summary_flag` | Claude Code JSONL `isCompactSummary: true` | 跳过该消息 |
+| 前缀 | `codex_guardian_history` | `The following is the Codex agent history` | 跳过整个会话 |
+| 前缀 | `codex_agents_md` | `# AGENTS.md instructions` | 跳过该条 user 消息 |
+| 前缀 | `continued_conversation_summary` | `This session is being continued from a previous conversation` | 跳过该条 user 消息 |
+| 前缀 | `codex_turn_aborted` | `<turn_aborted>` | 跳过该条 user 消息 |
+| 前缀 | `claude_caveat` | `Caveat: the following content is system generated` | 跳过该条 user 消息 |
+| 前缀 | `dsh_runtime_context` | `Current runtime context` | 跳过该条 user 消息 |
+| 前缀 | `dsh_skills_preamble` | `The following skills are available in this session:` | 跳过该条 user 消息 |
+| 标签 | `system_reminder_block` | 消息开头的完整 `<system-reminder>…</system-reminder>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `command_name_block` | 消息开头的完整 `<command-name>…</command-name>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `command_message_block` | 消息开头的完整 `<command-message>…</command-message>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `command_args_block` | 消息开头的完整 `<command-args>…</command-args>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `local_command_stdout_block` | 消息开头的完整 `<local-command-stdout>…</local-command-stdout>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `recommended_plugins_block` | 消息开头的完整 `<recommended_plugins>…</recommended_plugins>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `environment_context_block` | 消息开头的完整 `<environment_context>…</environment_context>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `subagent_notification_block` | 消息开头的完整 `<subagent_notification>…</subagent_notification>` | 剥离该块；剩余为空则跳过 |
+| 标签 | `skills_list_block` | 消息开头的完整 `<available_skills>…</available_skills>` | 剥离该块；剩余为空则跳过 |
+
+标签只剥离消息开头连续出现的完整块；普通正文中提到标签、未闭合标签不会触发。
+同步时，剥离后仍有用户文字就只保留剩余文字。对旧库，清理命令只逻辑撤回
+整条都由注入块构成的事件；混有用户文字的旧事件会保留，避免为了清掉注入片段
+而误撤回用户内容。字数按 `raw_text` 的 Unicode 字符数统计。
+
+用法：
+
+```bash
+brain --db ~/.local/share/personal-brain/db/brain.sqlite clean-injected --dry-run
+brain --db ~/.local/share/personal-brain/db/brain.sqlite clean-injected --dry-run \
+  --sample-file /tmp/d11_sample.md --sample-size 30
+brain --db ~/.local/share/personal-brain/db/brain.sqlite clean-injected --apply
+```
+
+默认 dry-run 使用只读 SQLite 连接。`--apply` 会先生成一致性备份，再按
+`injected_by_agent:<rule_name>` 写入撤回审计并逻辑撤回；不物理删除内容。Codex
+旧会话没有把 `session_meta` 持久化进库，因此本机清理会只读扫描
+`~/.codex/sessions/**/*.jsonl` 的 `session_meta` 行来关联 thread_spawn / guardian
+会话。若在其他机器对迁移来的库运行，需提供原会话目录；目录缺失时只能靠存量正文
+规则识别这些会话。
+
 ## 手动跑
 
 ```bash
