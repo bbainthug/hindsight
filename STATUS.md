@@ -56,25 +56,34 @@
 
 ## 进行中
 
-- **D-11 采集器假发言过滤**：实现已在本地分支 `fix/collector-injected`；同步解析器与存量清理共用规则表，新增带撤回原因审计的逻辑清理命令。尚未部署。
-  - 真实本地库只读 dry-run：4806 条 owner 发言 / 56,336,814 字符命中规则，影响 8656 个事件；识别 Codex 子 agent 会话 489 / 633。
-  - 最近 30 天 owner 发言预期（当前 → 清理后，条数 / 字符）：Claude 707 / 360,223 → 684 / 306,554；Codex 2389 / 26,030,080 → 1250 / 847,185；DSH 548 / 1,427,355 → 325 / 922,280；Hermes 68 / 34,570、main 186 / 15,174 不变。Gemini 没有近 30 天时间戳可供统计（另有 2727 条未知时间）。
-  - **存量清理尚未执行**，等待用户抽样核对并确认；未连接 VM。
-  - ruff、mypy、collector JS 检查通过；完整 pytest 中旧 soak 汇总门槛连续两次未通过，单独运行该测试一次通过，未放宽检查。
+- **D-2 事实层 v0**：实现在本地分支 `feat/d2-fact-layer`（3 个提交，510 测试通过，未推送）。合并前必须：
+  ① rebase 到 main，**把 D-2 的 migration 从 8 改为 9**（main 的 8 已被 D-11 的 `withdrawal_audit` 占用，VM 与本地库都已升到 8）；
+  ② 在清理后的本地库重跑 `brain facts extract --dry-run --since 2026-09-03`。按比例粗估约 450 万 tokens（清理前 6400 万），
+  仍超 50 万预算，v0 可能先只提炼部分来源；③ 用户决定模型与预算后再正式提炼。
+
+## 已完成（近期）
+
+- **D-11 采集器假发言过滤**（2026-10-03，PR #2）：规则表 `injected_rules.py` 解析与清理共用；`brain clean-injected`
+  默认 dry-run、`--apply` 先备份再逻辑撤回（原因写入 `withdrawal_audit`）。
+  - 本地库与 VM 库都已清理：各撤回 8665 个事件（约 5640 万字）；备份在各自 `backups/backup-2026-10-03T…`。
+  - 最近 30 天 Codex owner 发言 2609 万字 → 85 万字；VM 上搜索注入文本已无 owner 命中。
+  - launchd 部署副本 `~/.local/share/personal-brain/agent_sync/` 已同步新版 `sync_agents.py` 与 `injected_rules.py`
+    （副本无 personal_brain 包时从同目录导入规则表）；旧版留 `sync_agents.py.bak-20261003`。
+  - VM 清理时用的 Codex 子 agent 识别，来自 Mac 上 633 个会话文件的精简 `session_meta`（仅 id 与 source）。
 
 ## 下一步 / 暂缓（用户决定"先用用看"）
 
-- **D-11**：先核对 `/tmp/d11_sample.md`（撤回 / 保留各 30 条，每条至多 40 字符）；用户确认后再执行本地 `clean-injected --apply`。pytest 的 soak 汇总门槛失败原因尚未定位；按约定停止重复尝试。VM 清理仍待主会话验收后执行。
+- **D-11 遗留**：Claude Code 的 `<task-notification>` 后台任务通知仍被当作 owner 发言，需补一条规则；
+  Codex 桌面版会导入 Claude Code 会话，导致同一批 Claude 对话在 claude 与 codex 两个来源各有一份（如 20 条续写摘要），待去重。
+- **Gemini 导出缺陷**：每条用户发言带页面隐藏标签"你说"且正文重复一遍（`export_gemini.js` 抓到了读屏标签），
+  需修导出与转换，并撤回重导已入库的 gemini owner 发言。
 - **D-9**：宽泛词 exact 检索在 VM 上 3–7 s。嫌慢再立项。
-- **D-2**：从聊天记录自动提炼事实（偏好、经历、决定）。需用户先定方向。
 - **D-10（候选）**：采集 claude.ai 网页/App 对话（先试官方数据导出 + 导入器）。
 - **候选**：存工具调用摘要（只存工具名 + 命令，不存输出，过脱敏），用于"我上次部署跑了哪些命令"。
 
 ## 待办小事
 
 - VM `~/brain-data/backups/brain-pre-d8.sqlite`（1.9 GB）：确认稳定后删除。
-- 本地比 GitHub 多 1 个提交（Gemini 导出工具），推送需用户同意。
-- 简历上 "280 项 Pytest" 已过时（现 426）。
 
 ## 运维速查
 
