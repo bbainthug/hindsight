@@ -104,6 +104,7 @@ def _build_client(args: argparse.Namespace, cfg) -> OpenAICompatibleClient:
         temperature=facts.temperature,
         timeout_seconds=facts.timeout_seconds,
         max_output_tokens=facts.max_output_tokens,
+        extra_body=facts.extra_body,
     )
 
 

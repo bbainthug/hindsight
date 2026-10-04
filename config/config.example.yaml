@@ -21,7 +21,7 @@ search:
 # 未设置环境变量时 brain facts extract 报错，其余功能不受影响。
 facts:
   base_url: https://api.deepseek.com
-  model: deepseek-chat
+  model: deepseek-flash        # DeepSeek 2026-09 起的模型名（以官网为准）
   api_key_env: DEEPSEEK_API_KEY
   temperature: 0.2
   timeout_seconds: 120
@@ -34,3 +34,5 @@ facts:
   context_messages: 4          # 切分时携带的有限上下文条数
   # max_owner_chars: 500       # 跳过超过该长度的 owner 发言（超长粘贴文本，预算收窄用）
   # include_assistant_context: false  # 分段不携带 assistant 消息（预算收窄用，默认 true）
+  # extra_body:                  # 合并进请求体的附加字段；DeepSeek 默认开思考模式，会吃掉 max_tokens
+  #   thinking: {type: disabled}

@@ -64,12 +64,18 @@ class ExtractionInProgress(Exception):
     """相同幂等键已有运行中的提炼批次。"""
 
 
+# 请求体核心字段：由客户端自己设置，extra_body 不得覆盖
+RESERVED_REQUEST_FIELDS = frozenset(
+    {"model", "messages", "temperature", "max_tokens", "response_format", "stream"}
+)
+
+
 @dataclass
 class FactsConfig:
     """``facts:`` 配置段（密钥只从环境变量读，不在此出现）。"""
 
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-flash"
     api_key_env: str = "DEEPSEEK_API_KEY"
     temperature: float = 0.2
     timeout_seconds: float = 120.0
@@ -87,6 +93,10 @@ class FactsConfig:
     # 分段是否携带 assistant 消息作上下文。默认携带（质量更好）；
     # 预算收窄时可关闭（真实库实测 assistant 上下文占输入字符的绝大部分）。
     include_assistant_context: bool = True
+    # 合并进请求体的附加字段（如 DeepSeek 关闭默认思考模式：
+    # ``{"thinking": {"type": "disabled"}}``，否则思考内容会吃掉 max_tokens）。
+    # 不能覆盖 model/messages 等核心字段。
+    extra_body: dict[str, object] | None = None
 
     def validate(self) -> None:
         if not self.base_url.strip() or not self.model.strip() or not self.api_key_env.strip():
@@ -105,6 +115,12 @@ class FactsConfig:
             raise ValueError("facts.max_gap_seconds/context_messages 不能为负数")
         if self.max_owner_chars is not None and self.max_owner_chars < 1:
             raise ValueError("facts.max_owner_chars 必须是正整数或 null")
+        if self.extra_body is not None:
+            if not isinstance(self.extra_body, dict):
+                raise ValueError("facts.extra_body 必须是映射或 null")
+            reserved = set(self.extra_body) & RESERVED_REQUEST_FIELDS
+            if reserved:
+                raise ValueError(f"facts.extra_body 不能覆盖核心字段: {sorted(reserved)}")
         if not (0.0 < self.dedup_threshold <= 1.0):
             raise ValueError("facts.dedup_threshold 必须在 (0, 1]")
         if not (0.0 <= self.conflict_threshold < self.dedup_threshold):
@@ -174,6 +190,7 @@ def load_facts_config(data: dict | None) -> FactsConfig:
         "context_messages": "context_messages",
         "max_owner_chars": "max_owner_chars",
         "include_assistant_context": "include_assistant_context",
+        "extra_body": "extra_body",
     }
     for key, attr in mapping.items():
         if key in data and data[key] is not None:
@@ -311,6 +328,7 @@ def run_extraction(
             "context_messages": cfg.context_messages,
             "dedup_threshold": cfg.dedup_threshold,
             "conflict_threshold": cfg.conflict_threshold,
+            "extra_body": getattr(client, "extra_body", None),
             "similarity_backend": (
                 similarity.backend if similarity is not None else "bigram-jaccard"
             ),

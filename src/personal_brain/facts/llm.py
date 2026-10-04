@@ -66,6 +66,7 @@ class OpenAICompatibleClient:
         temperature: float = 0.2,
         timeout_seconds: float = 120.0,
         max_output_tokens: int = 2000,
+        extra_body: dict[str, object] | None = None,
     ) -> None:
         self.provider_name = provider_name
         self.base_url = base_url.rstrip("/")
@@ -74,6 +75,7 @@ class OpenAICompatibleClient:
         self._temperature = temperature
         self._timeout = timeout_seconds
         self._max_output_tokens = max_output_tokens
+        self.extra_body = dict(extra_body) if extra_body else None
         self._prompt_tokens = 0
         self._completion_tokens = 0
 
@@ -82,7 +84,8 @@ class OpenAICompatibleClient:
         return self._prompt_tokens, self._completion_tokens
 
     def complete_json(self, system: str, user: str) -> dict:
-        payload = {
+        payload: dict[str, object] = dict(self.extra_body or {})
+        payload |= {
             "model": self.model_id,
             "messages": [
                 {"role": "system", "content": system},
