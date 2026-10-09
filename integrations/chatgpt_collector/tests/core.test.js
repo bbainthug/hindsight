@@ -199,3 +199,19 @@ test("往回补多轮推进：游标逐轮下降，覆盖起始日期后的全�
   }
   assert.equal(seen.size, 40); // 1010..1049
 });
+
+test("isCollectorTab：只认记录在案的 ID 或带补采标记的 chatgpt.com 标签页", async () => {
+  const { isCollectorTab, CRAWL_TAB_URL } = await import("../lib/core.js");
+  // 带标记的补采页（含浏览器重启后恢复、ID 已变的情况）
+  assert.equal(isCollectorTab({ id: 9, url: CRAWL_TAB_URL }, []), true);
+  assert.equal(isCollectorTab({ id: 9, pendingUrl: CRAWL_TAB_URL, url: "" }, []), true);
+  // 记录在案的 ID，页面路由后 URL 已无标记
+  assert.equal(isCollectorTab({ id: 3, url: "https://chatgpt.com/" }, [3]), true);
+  // 用户自己的 chatgpt.com 标签页：不在记录、无标记 → 不关
+  assert.equal(isCollectorTab({ id: 4, url: "https://chatgpt.com/c/abc" }, [3]), false);
+  // ID 撞上但不是 chatgpt.com（浏览器重启后 ID 复用）→ 不关
+  assert.equal(isCollectorTab({ id: 3, url: "https://example.com/" }, [3]), false);
+  // 伪造标记的其他站点 → 不关
+  assert.equal(isCollectorTab({ id: 5, url: "https://evil.example/?hindsight_collector=1" }, []), false);
+  assert.equal(isCollectorTab(null, [1]), false);
+});
