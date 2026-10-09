@@ -17,12 +17,30 @@ const DEFAULT_SETTINGS = {
 
 const CRAWL_ALARM = "hindsight-crawl";
 const UPLOAD_ALARM = "hindsight-upload";
+const TRACKED_TABS_KEY = "hindsightCrawlTabs"; // storage.session：浏览器重启即清空，避免 ID 复用误关
+
+// 本次 SW 生命周期内是否有补采在跑（防止定时与"立即同步"并发各开一个标签页）
+let crawlRunning = null;
+
+// 孤儿页清理与补采串行：补采开始前先等清理结束，清理不会关掉补采刚开的标签页。
+let cleanupPromise = Promise.resolve();
+function scheduleCleanup() {
+  if (!crawlRunning) {
+    cleanupPromise = cleanupPromise.then(() => closeOrphanTabs()).catch(() => {});
+  }
+  return cleanupPromise;
+}
+
+// SW 每次被唤醒都会重新执行模块顶层：上一个 SW 实例开的补采页此刻已无人负责，补关。
+scheduleCleanup();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(CRAWL_ALARM, { periodInMinutes: core.CRAWL_INTERVAL_MIN });
   chrome.alarms.create(UPLOAD_ALARM, { periodInMinutes: core.UPLOAD_INTERVAL_MIN });
 });
 chrome.runtime.onStartup.addListener(() => {
+  // 浏览器重启后恢复出来的补采页（URL 带标记）也一并关掉
+  scheduleCleanup();
   chrome.alarms.create(CRAWL_ALARM, { periodInMinutes: core.CRAWL_INTERVAL_MIN });
   chrome.alarms.create(UPLOAD_ALARM, { periodInMinutes: core.UPLOAD_INTERVAL_MIN });
 });
@@ -49,18 +67,31 @@ async function setLastError(err) {
 // 对话列表，对"晚于水位线且未排除"的对话逐个取完整 JSON。
 // 节流（任务书硬要求，不放宽）：单轮 ≤20 个、请求间隔 ≥2s。
 // ------------------------------------------------------------------
-async function runCrawl() {
+function runCrawl() {
+  if (!crawlRunning) {
+    crawlRunning = crawlOnce().finally(() => { crawlRunning = null; });
+  }
+  return crawlRunning;
+}
+
+async function crawlOnce() {
   const settings = await loadSettings();
   if (settings.paused) return;
   const excluded = new Set(await db.allExcluded());
   const waterline = (await db.getMeta("waterline")) ?? null;
   let tab;
+  // 长任务期间每 20 秒调一次扩展 API，重置 SW 空闲计时，避免中途被终止而留下标签页
+  const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20_000);
+  const deadline = Date.now() + core.CRAWL_DEADLINE_MS;
   try {
     // 总是自己开一个后台标签页，用完关掉。不复用用户已开的 chatgpt.com 标签页：
     // 扩展安装 / 更新之前打开的页面里没有注入 content script（会报
     // "Receiving end does not exist"），而且不能动用户自己的标签页。
-    tab = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
-    await waitTabComplete(tab.id);
+    await cleanupPromise;
+    await closeOrphanTabs(); // 自己的标签页还没开，此刻记录里的都是孤儿
+    tab = await chrome.tabs.create({ url: core.CRAWL_TAB_URL, active: false });
+    await trackTab(tab.id, true);
+    await waitTabComplete(tab.id, core.TAB_LOAD_TIMEOUT_MS);
     await sleep(3000); // 页面初始化
     const floor = core.parseBackfillSince(settings.backfillSince);
     const cursor = (await db.getMeta("backfill_cursor")) ?? null;
@@ -68,6 +99,7 @@ async function runCrawl() {
     const stopAt = floor != null ? floor : (waterline ?? Infinity);
     const listedAll = [];
     for (let page = 0; page < core.LIST_MAX_PAGES; page++) {
+      checkDeadline(deadline);
       if (page > 0) await sleep(core.CRAWL_GAP_MS); // 节流：列表翻页同样间隔 ≥2s
       const listed = await requestAdapter(tab.id, "crawl", {
         offset: page * core.LIST_PAGE_SIZE, limit: core.LIST_PAGE_SIZE,
@@ -92,6 +124,7 @@ async function runCrawl() {
     const doneBackfill = [];
     const queue = [...forward.map((i) => [i, doneForward]), ...backfill.map((i) => [i, doneBackfill])];
     for (let k = 0; k < queue.length; k++) {
+      checkDeadline(deadline);
       const [item, doneList] = queue[k];
       const conv = await fetchConversationVia(tab.id, item.id);
       if (conv && !core.isTemporary(conv)) await storeConversation(conv);
@@ -108,9 +141,40 @@ async function runCrawl() {
   } catch (err) {
     await setLastError(err);
   } finally {
+    clearInterval(keepAlive);
     // 只关自己开的那个后台标签页
-    if (tab) chrome.tabs.remove(tab.id).catch(() => {});
+    if (tab) {
+      await chrome.tabs.remove(tab.id).catch(() => {});
+      await trackTab(tab.id, false);
+    }
   }
+}
+
+function checkDeadline(deadline) {
+  // 超时时已处理的对话会保存，但本轮水位线不推进，下一轮重取
+  if (Date.now() > deadline) throw new Error("crawl deadline exceeded");
+}
+
+async function trackedTabIds() {
+  return (await chrome.storage.session.get(TRACKED_TABS_KEY))[TRACKED_TABS_KEY] || [];
+}
+
+async function trackTab(tabId, add) {
+  const ids = (await trackedTabIds()).filter((id) => id !== tabId);
+  if (add) ids.push(tabId);
+  await chrome.storage.session.set({ [TRACKED_TABS_KEY]: ids });
+}
+
+// 关掉无人负责的补采页：记录在案的 ID，或 URL 带补采标记的 chatgpt.com 标签页。
+// 只在补采开标签页之前调用（经 scheduleCleanup 或 crawlOnce 开头）。
+// 用户自己开的 chatgpt.com 标签页不会被关。
+async function closeOrphanTabs() {
+  const tracked = await trackedTabIds();
+  const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
+  for (const t of tabs) {
+    if (core.isCollectorTab(t, tracked)) await chrome.tabs.remove(t.id).catch(() => {});
+  }
+  await chrome.storage.session.set({ [TRACKED_TABS_KEY]: [] });
 }
 
 async function fetchConversationVia(tabId, id) {
@@ -126,15 +190,23 @@ async function requestAdapter(tabId, adapterType, payload) {
   });
 }
 
-function waitTabComplete(tabId) {
-  return new Promise((resolve) => {
+// 等标签页加载完成；有超时，且先查一次当前状态（complete 事件可能在注册监听前就发生了）
+function waitTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("chatgpt.com tab load timeout"));
+    }, timeoutMs);
+    function done() {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }
     function listener(updatedTabId, info) {
-      if (updatedTabId === tabId && info.status === "complete") {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
+      if (updatedTabId === tabId && info.status === "complete") done();
     }
     chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then((t) => { if (t.status === "complete") done(); }, () => {});
   });
 }
 

@@ -175,3 +175,27 @@ export function parseBackfillSince(s) {
   if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s.trim())) return null;
   return toEpochSeconds(s.trim() + "T00:00:00Z");
 }
+
+// ------------------------------------------------------------------
+// 补采标签页生命周期：扩展自己开的后台 chatgpt.com 标签页必须关掉。
+// MV3 service worker 空闲约 30 秒就会被 Chrome 终止，终止时 finally 不执行，
+// 所以除了 finally 关闭，还要记住开过哪些标签页，下次醒来时补关。
+// ------------------------------------------------------------------
+export const COLLECTOR_TAB_MARK = "hindsight_collector";
+export const CRAWL_TAB_URL = `https://chatgpt.com/?${COLLECTOR_TAB_MARK}=1`;
+export const TAB_LOAD_TIMEOUT_MS = 45_000;    // 页面加载超时，超时即放弃本轮
+export const CRAWL_DEADLINE_MS = 4 * 60_000;  // 单轮补采总时限（低于 SW 单事件 5 分钟上限）
+
+// 只关扩展自己开的标签页：必须是 chatgpt.com，且是记录在案的 ID 或带补采标记的 URL。
+// 用户自己开的 chatgpt.com 标签页（无标记、不在记录里）永远不动。
+export function isCollectorTab(tab, trackedIds) {
+  if (!tab || typeof tab.id !== "number") return false;
+  const url = String(tab.url || tab.pendingUrl || "");
+  if (!url.startsWith("https://chatgpt.com/")) return false;
+  if ((trackedIds || []).includes(tab.id)) return true;
+  try {
+    return new URL(url).searchParams.has(COLLECTOR_TAB_MARK);
+  } catch (_) {
+    return false;
+  }
+}
