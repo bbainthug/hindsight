@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import sqlite3
 from dataclasses import dataclass, field
@@ -50,6 +51,35 @@ class RestoreCheckResult:
     counts: dict[str, int] = field(default_factory=dict)
     snapshot_sha256: str = ""
     manifest_ok: bool = True
+
+
+_BACKUP_NAME = re.compile(r"^backup-\d{4}-\d{2}-\d{2}T\d{6}\.\d{6}Z$")
+
+
+def prune_backups(backup_dir: Path, keep: int, protect: Path | None = None) -> list[Path]:
+    """轮换：只保留最新 ``keep`` 份完整备份，返回被删除的目录。
+
+    只认 ``backup-<时间戳>`` 命名且含 manifest.json 的目录（完整备份）；
+    其他文件、未完成的备份目录一律不动。``protect``（刚生成的那份）永不删除。
+    """
+    if keep < 1:
+        raise ValueError("keep 必须 ≥ 1")
+    backup_dir = Path(backup_dir)
+    if not backup_dir.is_dir():
+        return []
+    complete = sorted(
+        p
+        for p in backup_dir.iterdir()
+        if p.is_dir() and _BACKUP_NAME.match(p.name) and (p / "manifest.json").is_file()
+    )
+    protected = Path(protect).resolve() if protect is not None else None
+    removed: list[Path] = []
+    for p in complete[:-keep]:
+        if protected is not None and p.resolve() == protected:
+            continue
+        shutil.rmtree(p)
+        removed.append(p)
+    return removed
 
 
 def backup(

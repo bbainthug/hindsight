@@ -15,7 +15,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from personal_brain.backup import backup, restore_check
+from personal_brain.backup import backup, prune_backups, restore_check
 from personal_brain.clean_injected import (
     analyze_injected,
     load_codex_imported_conversation_ids,
@@ -122,6 +122,8 @@ def _emit_human(data: dict) -> None:
         )
     elif kind == "backup":
         print(f"备份完成: {data['backup_dir']}\n  sha256={data['snapshot_sha256']}")
+        if data.get("pruned"):
+            print(f"  轮换删除旧备份 {len(data['pruned'])} 份")
     elif kind == "restore_check":
         print(
             f"备份校验: integrity={data['integrity']} "
@@ -418,10 +420,15 @@ def cmd_withdraw_event(args, cfg: BrainConfig, as_json: bool) -> int:
 
 
 def cmd_backup(args, cfg: BrainConfig, as_json: bool) -> int:
-    result = backup(
-        cfg.db_path,
-        Path(args.dest) if args.dest else cfg.backup_dir,
-        archive_dir=cfg.archive_dir,
+    if args.keep is not None and args.keep < 1:
+        raise SystemExit("--keep 必须 ≥ 1")
+    dest_dir = Path(args.dest) if args.dest else cfg.backup_dir
+    result = backup(cfg.db_path, dest_dir, archive_dir=cfg.archive_dir)
+    # 先确认新备份完成再轮换；新备份本身永不删除
+    pruned = (
+        prune_backups(dest_dir, args.keep, protect=result.backup_dir)
+        if args.keep is not None
+        else []
     )
     _emit(
         {
@@ -431,6 +438,7 @@ def cmd_backup(args, cfg: BrainConfig, as_json: bool) -> int:
             "snapshot_sha256": result.snapshot_sha256,
             "archive_files": result.archive_files,
             "created_at": result.created_at,
+            "pruned": [str(p) for p in pruned],
         },
         as_json,
     )
@@ -1065,6 +1073,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backup", help="一致性备份（快照 + Raw 归档 + manifest）")
     p.add_argument("--dest")
+    p.add_argument(
+        "--keep",
+        type=int,
+        help="备份成功后只保留最新 N 份完整备份（默认不删除旧备份）",
+    )
     p.set_defaults(func=cmd_backup)
 
     p = sub.add_parser("clean-injected", help="逻辑撤回 agent 自动注入的 owner 假发言")
